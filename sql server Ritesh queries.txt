@@ -1,3 +1,11 @@
+-- Tables and row cound for database ordered by biggest table
+
+SELECT  QUOTENAME(SCHEMA_NAME(sOBJ.schema_id)) + '.' + QUOTENAME(sOBJ.name) AS [TableName] , SUM(sPTN.Rows) AS [RowCount]
+FROM   sys.objects AS sOBJ   INNER JOIN sys.partitions AS sPTN       ON sOBJ.object_id = sPTN.object_id
+WHERE  sOBJ.type = 'U'    AND sOBJ.is_ms_shipped = 0x0    AND index_id < 2 -- 0:Heap, 1:Clustered
+GROUP BY sOBJ.schema_id, sOBJ.name ORDER BY 2 desc
+
+
 -- File names and paths for all user and system databases on instance  (Query 24) (Database Filenames and Paths)
 SELECT DB_NAME([database_id]) AS [Database Name], 
        [file_id], [name], physical_name, [type_desc], state_desc,
