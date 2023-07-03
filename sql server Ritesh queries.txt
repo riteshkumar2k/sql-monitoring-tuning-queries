@@ -1,1024 +1,647 @@
--- Tables and row cound for database ordered by biggest table
-
-SELECT  QUOTENAME(SCHEMA_NAME(sOBJ.schema_id)) + '.' + QUOTENAME(sOBJ.name) AS [TableName] , SUM(sPTN.Rows) AS [RowCount]
-FROM   sys.objects AS sOBJ   INNER JOIN sys.partitions AS sPTN       ON sOBJ.object_id = sPTN.object_id
-WHERE  sOBJ.type = 'U'    AND sOBJ.is_ms_shipped = 0x0    AND index_id < 2 -- 0:Heap, 1:Clustered
-GROUP BY sOBJ.schema_id, sOBJ.name ORDER BY 2 desc
-
-
--- File names and paths for all user and system databases on instance  (Query 24) (Database Filenames and Paths)
-SELECT DB_NAME([database_id]) AS [Database Name], 
-       [file_id], [name], physical_name, [type_desc], state_desc,
-	   is_percent_growth, growth, 
-	   CONVERT(bigint, growth/128.0) AS [Growth in MB], 
-       CONVERT(bigint, size/128.0) AS [Total Size in MB], max_size
-FROM sys.master_files WITH (NOLOCK)
-ORDER BY DB_NAME([database_id]), [file_id] OPTION (RECOMPILE);
-
-
-
-
--- Drive level latency information (Query 27) (Drive Level Latency)
--- Shows you the drive-level latency for reads and writes, in milliseconds
--- Latency above 30-40ms is usually a problem
--- These latency numbers include all file activity against all SQL Server 
--- database files on each drive since SQL Server was last started
-
-SELECT tab.[Drive], tab.volume_mount_point AS [Volume Mount Point], 
-	CASE 
-		WHEN num_of_reads = 0 THEN 0 
-		ELSE (io_stall_read_ms/num_of_reads) 
-	END AS [Read Latency],
-	CASE 
-		WHEN num_of_writes = 0 THEN 0 
-		ELSE (io_stall_write_ms/num_of_writes) 
-	END AS [Write Latency],
-	CASE 
-		WHEN (num_of_reads = 0 AND num_of_writes = 0) THEN 0 
-		ELSE (io_stall/(num_of_reads + num_of_writes)) 
-	END AS [Overall Latency],
-	CASE 
-		WHEN num_of_reads = 0 THEN 0 
-		ELSE (num_of_bytes_read/num_of_reads) 
-	END AS [Avg Bytes/Read],
-	CASE 
-		WHEN num_of_writes = 0 THEN 0 
-		ELSE (num_of_bytes_written/num_of_writes) 
-	END AS [Avg Bytes/Write],
-	CASE 
-		WHEN (num_of_reads = 0 AND num_of_writes = 0) THEN 0 
-		ELSE ((num_of_bytes_read + num_of_bytes_written)/(num_of_reads + num_of_writes)) 
-	END AS [Avg Bytes/Transfer]
-FROM (SELECT LEFT(UPPER(mf.physical_name), 2) AS Drive, SUM(num_of_reads) AS num_of_reads,
-	         SUM(io_stall_read_ms) AS io_stall_read_ms, SUM(num_of_writes) AS num_of_writes,
-	         SUM(io_stall_write_ms) AS io_stall_write_ms, SUM(num_of_bytes_read) AS num_of_bytes_read,
-	         SUM(num_of_bytes_written) AS num_of_bytes_written, SUM(io_stall) AS io_stall, vs.volume_mount_point 
-      FROM sys.dm_io_virtual_file_stats(NULL, NULL) AS vfs
-      INNER JOIN sys.master_files AS mf WITH (NOLOCK)
-      ON vfs.database_id = mf.database_id AND vfs.file_id = mf.file_id
-	  CROSS APPLY sys.dm_os_volume_stats(mf.database_id, mf.[file_id]) AS vs 
-      GROUP BY LEFT(UPPER(mf.physical_name), 2), vs.volume_mount_point) AS tab
-ORDER BY [Overall Latency] OPTION (RECOMPILE);
-
-
-
--- Calculates average stalls per read, per write, and per total input/output for each database file  (Query 28) (IO Latency by File)
-SELECT DB_NAME(fs.database_id) AS [Database Name], CAST(fs.io_stall_read_ms/(1.0 + fs.num_of_reads) AS NUMERIC(10,1)) AS [avg_read_latency_ms],
-CAST(fs.io_stall_write_ms/(1.0 + fs.num_of_writes) AS NUMERIC(10,1)) AS [avg_write_latency_ms],
-CAST((fs.io_stall_read_ms + fs.io_stall_write_ms)/(1.0 + fs.num_of_reads + fs.num_of_writes) AS NUMERIC(10,1)) AS [avg_io_latency_ms],
-CONVERT(DECIMAL(18,2), mf.size/128.0) AS [File Size (MB)], mf.physical_name, mf.type_desc, fs.io_stall_read_ms, fs.num_of_reads, 
-fs.io_stall_write_ms, fs.num_of_writes, fs.io_stall_read_ms + fs.io_stall_write_ms AS [io_stalls], fs.num_of_reads + fs.num_of_writes AS [total_io],
-io_stall_queued_read_ms AS [Resource Governor Total Read IO Latency (ms)], io_stall_queued_write_ms AS [Resource Governor Total Write IO Latency (ms)] 
-FROM sys.dm_io_virtual_file_stats(null,null) AS fs
-INNER JOIN sys.master_files AS mf WITH (NOLOCK)
-ON fs.database_id = mf.database_id
-AND fs.[file_id] = mf.[file_id]
-ORDER BY avg_io_latency_ms DESC OPTION (RECOMPILE);
-------
-
--- Helps determine which database files on the entire instance have the most I/O bottlenecks
--- This can help you decide whether certain LUNs are overloaded and whether you might
--- want to move some files to a different location or perhaps improve your I/O performance
--- These latency numbers include all file activity against each SQL Server 
--- database file since SQL Server was last started
-
-
-
-
-
-
-
--- Recovery model, log reuse wait description, log file size, log usage size  (Query 31) (Database Properties)
--- and compatibility level for all databases on instance
-SELECT db.[name] AS [Database Name], SUSER_SNAME(db.owner_sid) AS [Database Owner],
-db.[compatibility_level] AS [DB Compatibility Level], 
-db.recovery_model_desc AS [Recovery Model], 
-db.log_reuse_wait_desc AS [Log Reuse Wait Description], 
-CONVERT(DECIMAL(18,2), ls.cntr_value/1024.0) AS [Log Size (MB)], CONVERT(DECIMAL(18,2), lu.cntr_value/1024.0) AS [Log Used (MB)],
-CAST(CAST(lu.cntr_value AS FLOAT) / CAST(ls.cntr_value AS FLOAT)AS DECIMAL(18,2)) * 100 AS [Log Used %], 
-db.page_verify_option_desc AS [Page Verify Option], db.user_access_desc, db.state_desc, db.containment_desc,
-db.is_mixed_page_allocation_on,  
-db.is_auto_create_stats_on, db.is_auto_update_stats_on, db.is_auto_update_stats_async_on, db.is_parameterization_forced, 
-db.snapshot_isolation_state_desc, db.is_read_committed_snapshot_on, db.is_auto_close_on, db.is_auto_shrink_on, 
-db.target_recovery_time_in_seconds, db.is_cdc_enabled, db.is_published, db.is_distributor, db.is_sync_with_backup, 
-db.group_database_id, db.replica_id, db.is_memory_optimized_elevate_to_snapshot_on, 
-db.delayed_durability_desc, db.is_query_store_on, 
-db.is_temporal_history_retention_enabled, db.is_remote_data_archive_enabled, 
-db.is_master_key_encrypted_by_server, db.is_encrypted, de.encryption_state, de.percent_complete, de.key_algorithm, de.key_length
-FROM sys.databases AS db WITH (NOLOCK)
-LEFT OUTER JOIN sys.dm_os_performance_counters AS lu WITH (NOLOCK)
-ON db.name = lu.instance_name
-LEFT OUTER JOIN sys.dm_os_performance_counters AS ls WITH (NOLOCK)
-ON db.name = ls.instance_name
-LEFT OUTER JOIN sys.dm_database_encryption_keys AS de WITH (NOLOCK)
-ON db.database_id = de.database_id
-WHERE lu.counter_name LIKE N'Log File(s) Used Size (KB)%' 
-AND ls.counter_name LIKE N'Log File(s) Size (KB)%'
-AND ls.cntr_value > 0 
-ORDER BY db.[name] OPTION (RECOMPILE);
-------
-
--- sys.databases (Transact-SQL)
--- https://bit.ly/2G5wqaX
-
--- sys.dm_os_performance_counters (Transact-SQL)
--- https://bit.ly/3kEO2JR
-
--- sys.dm_database_encryption_keys (Transact-SQL)
--- https://bit.ly/3mE7kkx
-
-
--- Things to look at:
--- How many databases are on the instance?
--- What recovery models are they using?
--- What is the log reuse wait description?
--- How full are the transaction logs?
--- What compatibility level are the databases on? 
--- What is the Page Verify Option? (should be CHECKSUM)
--- Is Auto Update Statistics Asynchronously enabled?
--- Is Delayed Durability enabled
--- Make sure auto_shrink and auto_close are not enabled!
-
-
-
-
-
-
-
--- Missing Indexes for all databases by Index Advantage  (Query 32) (Missing Indexes All Databases)
-SELECT CONVERT(decimal(18,2), migs.user_seeks * migs.avg_total_user_cost * (migs.avg_user_impact * 0.01)) AS [index_advantage],
-FORMAT(migs.last_user_seek, 'yyyy-MM-dd HH:mm:ss') AS [last_user_seek], mid.[statement] AS [Database.Schema.Table],
-COUNT(1) OVER(PARTITION BY mid.[statement]) AS [missing_indexes_for_table],
-COUNT(1) OVER(PARTITION BY mid.[statement], mid.equality_columns) AS [similar_missing_indexes_for_table],
-mid.equality_columns, mid.inequality_columns, mid.included_columns, migs.user_seeks, 
-CONVERT(decimal(18,2), migs.avg_total_user_cost) AS [avg_total_user_cost], migs.avg_user_impact 
-FROM sys.dm_db_missing_index_group_stats AS migs WITH (NOLOCK)
-INNER JOIN sys.dm_db_missing_index_groups AS mig WITH (NOLOCK)
-ON migs.group_handle = mig.index_group_handle
-INNER JOIN sys.dm_db_missing_index_details AS mid WITH (NOLOCK)
-ON mig.index_handle = mid.index_handle
-ORDER BY index_advantage DESC OPTION (RECOMPILE);
-------
-
--- Getting missing index information for all of the databases on the instance is very useful
--- Look at last user seek time, number of user seeks to help determine source and importance
--- Also look at avg_user_impact and avg_total_user_cost to help determine importance
--- SQL Server is overly eager to add included columns, so beware
--- Do not just blindly add indexes that show up from this query!!!
--- Håkan Winther has given me some great suggestions for this query
-
--- SQL Server Index Design Guide
--- https://bit.ly/2qtZr4N
-
-
-
-
-
--- Get VLF Counts for all databases on the instance (Query 33) (VLF Counts)
-SELECT [name] AS [Database Name], [VLF Count]
-FROM sys.databases AS db WITH (NOLOCK)
-CROSS APPLY (SELECT file_id, COUNT(*) AS [VLF Count]
-		     FROM sys.dm_db_log_info(db.database_id)
-			 GROUP BY file_id) AS li
-ORDER BY [VLF Count] DESC OPTION (RECOMPILE);
-------
-
--- High VLF counts can affect write performance to the log file
--- and they can make full database restores and crash recovery take much longer
--- Try to keep your VLF counts under 200 in most cases (depending on log file size)
-
--- Important change to VLF creation algorithm in SQL Server 2014
--- https://bit.ly/2Hsjbg4
-
--- SQL Server Transaction Log Architecture and Management Guide
--- https://bit.ly/2JjmQRZ
-
-
-
-
-
-
--- Get CPU utilization by database (Query 34) (CPU Usage by Database)
-WITH DB_CPU_Stats
-AS
-(SELECT pa.DatabaseID, DB_Name(pa.DatabaseID) AS [Database Name], SUM(qs.total_worker_time/1000) AS [CPU_Time_Ms]
- FROM sys.dm_exec_query_stats AS qs WITH (NOLOCK)
- CROSS APPLY (SELECT CONVERT(int, value) AS [DatabaseID] 
-              FROM sys.dm_exec_plan_attributes(qs.plan_handle)
-              WHERE attribute = N'dbid') AS pa
- GROUP BY DatabaseID)
-SELECT ROW_NUMBER() OVER(ORDER BY [CPU_Time_Ms] DESC) AS [CPU Rank],
-       [Database Name], [CPU_Time_Ms] AS [CPU Time (ms)], 
-       CAST([CPU_Time_Ms] * 1.0 / SUM([CPU_Time_Ms]) OVER() * 100.0 AS DECIMAL(5, 2)) AS [CPU Percent]
-FROM DB_CPU_Stats
-WHERE DatabaseID <> 32767 -- ResourceDB
-ORDER BY [CPU Rank] OPTION (RECOMPILE);
-------
-
--- Helps determine which database is using the most CPU resources on the instance
--- Note: This only reflects CPU usage from the currently cached query plans
-
-
--- Get I/O utilization by database (Query 35) (IO Usage By Database)
-WITH Aggregate_IO_Statistics
-AS (SELECT DB_NAME(database_id) AS [Database Name],
-    CAST(SUM(num_of_bytes_read + num_of_bytes_written) / 1048576 AS DECIMAL(12, 2)) AS [ioTotalMB],
-    CAST(SUM(num_of_bytes_read ) / 1048576 AS DECIMAL(12, 2)) AS [ioReadMB],
-    CAST(SUM(num_of_bytes_written) / 1048576 AS DECIMAL(12, 2)) AS [ioWriteMB]
-    FROM sys.dm_io_virtual_file_stats(NULL, NULL) AS [DM_IO_STATS]
-    GROUP BY database_id)
-SELECT ROW_NUMBER() OVER (ORDER BY ioTotalMB DESC) AS [I/O Rank],
-        [Database Name], ioTotalMB AS [Total I/O (MB)],
-        CAST(ioTotalMB / SUM(ioTotalMB) OVER () * 100.0 AS DECIMAL(5, 2)) AS [Total I/O %],
-        ioReadMB AS [Read I/O (MB)], 
-		CAST(ioReadMB / SUM(ioReadMB) OVER () * 100.0 AS DECIMAL(5, 2)) AS [Read I/O %],
-        ioWriteMB AS [Write I/O (MB)], 
-		CAST(ioWriteMB / SUM(ioWriteMB) OVER () * 100.0 AS DECIMAL(5, 2)) AS [Write I/O %]
-FROM Aggregate_IO_Statistics
-ORDER BY [I/O Rank] OPTION (RECOMPILE);
-------
-
--- Helps determine which database is using the most I/O resources on the instance
--- These numbers are cumulative since the last service restart
--- They include all I/O activity, not just the nominal I/O workload
-
-
--- Get total buffer usage by database for current instance  (Query 36) (Total Buffer Usage by Database)
--- This may take some time to run on a busy instance with lots of RAM
-WITH AggregateBufferPoolUsage
-AS
-(SELECT DB_NAME(database_id) AS [Database Name],
-CAST(COUNT_BIG(*) * 8/1024.0 AS DECIMAL (15,2))  AS [CachedSize]
-FROM sys.dm_os_buffer_descriptors WITH (NOLOCK)
-WHERE database_id <> 32767 -- ResourceDB
-GROUP BY DB_NAME(database_id))
-SELECT ROW_NUMBER() OVER(ORDER BY CachedSize DESC) AS [Buffer Pool Rank], [Database Name], CachedSize AS [Cached Size (MB)],
-       CAST(CachedSize / SUM(CachedSize) OVER() * 100.0 AS DECIMAL(5,2)) AS [Buffer Pool Percent]
-FROM AggregateBufferPoolUsage
-ORDER BY [Buffer Pool Rank] OPTION (RECOMPILE);
-------
-
--- Tells you how much memory (in the buffer pool) 
--- is being used by each database on the instance
-
--- sys.dm_os_buffer_descriptors (Transact-SQL)
--- https://bit.ly/36s7aFo
-
-
-
--- Clear Wait Stats with this command
--- DBCC SQLPERF('sys.dm_os_wait_stats', CLEAR);
-
--- Isolate top waits for server instance since last restart or wait statistics clear  (Query 38) (Top Waits)
-WITH [Waits] 
-AS (SELECT wait_type, wait_time_ms/ 1000.0 AS [WaitS],
-          (wait_time_ms - signal_wait_time_ms) / 1000.0 AS [ResourceS],
-           signal_wait_time_ms / 1000.0 AS [SignalS],
-           waiting_tasks_count AS [WaitCount],
-           100.0 *  wait_time_ms / SUM (wait_time_ms) OVER() AS [Percentage],
-           ROW_NUMBER() OVER(ORDER BY wait_time_ms DESC) AS [RowNum]
-    FROM sys.dm_os_wait_stats WITH (NOLOCK)
-    WHERE [wait_type] NOT IN (
-        N'BROKER_EVENTHANDLER', N'BROKER_RECEIVE_WAITFOR', N'BROKER_TASK_STOP',
-		N'BROKER_TO_FLUSH', N'BROKER_TRANSMITTER', N'CHECKPOINT_QUEUE',
-        N'CHKPT', N'CLR_AUTO_EVENT', N'CLR_MANUAL_EVENT', N'CLR_SEMAPHORE', N'CXCONSUMER',
-        N'DBMIRROR_DBM_EVENT', N'DBMIRROR_EVENTS_QUEUE', N'DBMIRROR_WORKER_QUEUE',
-		N'DBMIRRORING_CMD', N'DIRTY_PAGE_POLL', N'DISPATCHER_QUEUE_SEMAPHORE',
-        N'EXECSYNC', N'FSAGENT', N'FT_IFTS_SCHEDULER_IDLE_WAIT', N'FT_IFTSHC_MUTEX',
-        N'HADR_CLUSAPI_CALL', N'HADR_FILESTREAM_IOMGR_IOCOMPLETION', N'HADR_LOGCAPTURE_WAIT', 
-		N'HADR_NOTIFICATION_DEQUEUE', N'HADR_TIMER_TASK', N'HADR_WORK_QUEUE',
-        N'KSOURCE_WAKEUP', N'LAZYWRITER_SLEEP', N'LOGMGR_QUEUE', 
-		N'MEMORY_ALLOCATION_EXT', N'ONDEMAND_TASK_QUEUE',
-		N'PARALLEL_REDO_DRAIN_WORKER', N'PARALLEL_REDO_LOG_CACHE', N'PARALLEL_REDO_TRAN_LIST',
-		N'PARALLEL_REDO_WORKER_SYNC', N'PARALLEL_REDO_WORKER_WAIT_WORK',
-		N'PREEMPTIVE_HADR_LEASE_MECHANISM', N'PREEMPTIVE_SP_SERVER_DIAGNOSTICS',
-		N'PREEMPTIVE_OS_LIBRARYOPS', N'PREEMPTIVE_OS_COMOPS', N'PREEMPTIVE_OS_CRYPTOPS',
-		N'PREEMPTIVE_OS_PIPEOPS', N'PREEMPTIVE_OS_AUTHENTICATIONOPS',
-		N'PREEMPTIVE_OS_GENERICOPS', N'PREEMPTIVE_OS_VERIFYTRUST',
-		N'PREEMPTIVE_OS_FILEOPS', N'PREEMPTIVE_OS_DEVICEOPS', N'PREEMPTIVE_OS_QUERYREGISTRY',
-		N'PREEMPTIVE_OS_WRITEFILE',
-		N'PREEMPTIVE_XE_CALLBACKEXECUTE', N'PREEMPTIVE_XE_DISPATCHER',
-		N'PREEMPTIVE_XE_GETTARGETSTATE', N'PREEMPTIVE_XE_SESSIONCOMMIT',
-		N'PREEMPTIVE_XE_TARGETINIT', N'PREEMPTIVE_XE_TARGETFINALIZE',
-        N'PWAIT_ALL_COMPONENTS_INITIALIZED', N'PWAIT_DIRECTLOGCONSUMER_GETNEXT',
-		N'QDS_PERSIST_TASK_MAIN_LOOP_SLEEP',
-		N'QDS_ASYNC_QUEUE',
-        N'QDS_CLEANUP_STALE_QUERIES_TASK_MAIN_LOOP_SLEEP', N'REQUEST_FOR_DEADLOCK_SEARCH',
-		N'RESOURCE_QUEUE', N'SERVER_IDLE_CHECK', N'SLEEP_BPOOL_FLUSH', N'SLEEP_DBSTARTUP',
-		N'SLEEP_DCOMSTARTUP', N'SLEEP_MASTERDBREADY', N'SLEEP_MASTERMDREADY',
-        N'SLEEP_MASTERUPGRADED', N'SLEEP_MSDBSTARTUP', N'SLEEP_SYSTEMTASK', N'SLEEP_TASK',
-        N'SLEEP_TEMPDBSTARTUP', N'SNI_HTTP_ACCEPT', N'SP_SERVER_DIAGNOSTICS_SLEEP',
-		N'SQLTRACE_BUFFER_FLUSH', N'SQLTRACE_INCREMENTAL_FLUSH_SLEEP', N'SQLTRACE_WAIT_ENTRIES',
-		N'WAIT_FOR_RESULTS', N'WAITFOR', N'WAITFOR_TASKSHUTDOWN', N'WAIT_XTP_HOST_WAIT',
-		N'WAIT_XTP_OFFLINE_CKPT_NEW_LOG', N'WAIT_XTP_CKPT_CLOSE', N'WAIT_XTP_RECOVERY',
-		N'XE_BUFFERMGR_ALLPROCESSED_EVENT', N'XE_DISPATCHER_JOIN',
-        N'XE_DISPATCHER_WAIT', N'XE_LIVE_TARGET_TVF', N'XE_TIMER_EVENT')
-    AND waiting_tasks_count > 0)
-SELECT
-    MAX (W1.wait_type) AS [WaitType],
-	CAST (MAX (W1.Percentage) AS DECIMAL (5,2)) AS [Wait Percentage],
-	CAST ((MAX (W1.WaitS) / MAX (W1.WaitCount)) AS DECIMAL (16,4)) AS [AvgWait_Sec],
-    CAST ((MAX (W1.ResourceS) / MAX (W1.WaitCount)) AS DECIMAL (16,4)) AS [AvgRes_Sec],
-    CAST ((MAX (W1.SignalS) / MAX (W1.WaitCount)) AS DECIMAL (16,4)) AS [AvgSig_Sec], 
-    CAST (MAX (W1.WaitS) AS DECIMAL (16,2)) AS [Wait_Sec],
-    CAST (MAX (W1.ResourceS) AS DECIMAL (16,2)) AS [Resource_Sec],
-    CAST (MAX (W1.SignalS) AS DECIMAL (16,2)) AS [Signal_Sec],
-    MAX (W1.WaitCount) AS [Wait Count],
-	CAST (N'https://www.sqlskills.com/help/waits/' + W1.wait_type AS XML) AS [Help/Info URL]
-FROM Waits AS W1
-INNER JOIN Waits AS W2
-ON W2.RowNum <= W1.RowNum
-GROUP BY W1.RowNum, W1.wait_type
-HAVING SUM (W2.Percentage) - MAX (W1.Percentage) < 99 -- percentage threshold
-OPTION (RECOMPILE);
-------
-
--- Cumulative wait stats are not as useful on an idle instance that is not under load or performance pressure
-
--- SQL Server Wait Types Library
--- https://bit.ly/2ePzYO2
-
--- The SQL Server Wait Type Repository
--- https://bit.ly/1afzfjC
-
--- Wait statistics, or please tell me where it hurts
--- https://bit.ly/2wsQHQE
-
--- SQL Server 2005 Performance Tuning using the Waits and Queues
--- https://bit.ly/1o2NFoF
-
--- sys.dm_os_wait_stats (Transact-SQL)
--- https://bit.ly/2Hjq9Yl
-
-
-
-
-
--- Get a count of SQL connections by IP address (Query 39) (Connection Counts by IP Address)
-SELECT ec.client_net_address, es.[program_name], es.[host_name], es.login_name, 
-COUNT(ec.session_id) AS [connection count] 
-FROM sys.dm_exec_sessions AS es WITH (NOLOCK) 
-INNER JOIN sys.dm_exec_connections AS ec WITH (NOLOCK) 
-ON es.session_id = ec.session_id 
-GROUP BY ec.client_net_address, es.[program_name], es.[host_name], es.login_name  
-ORDER BY ec.client_net_address, es.[program_name] OPTION (RECOMPILE);
-------
-
--- This helps you figure where your database load is coming from
--- and verifies connectivity from other machines
-
-
-
-
-
--- Get Average Task Counts (run multiple times)  (Query 40) (Avg Task Counts)
-SELECT AVG(current_tasks_count) AS [Avg Task Count], 
-AVG(work_queue_count) AS [Avg Work Queue Count],
-AVG(runnable_tasks_count) AS [Avg Runnable Task Count],
-AVG(pending_disk_io_count) AS [Avg Pending DiskIO Count]
-FROM sys.dm_os_schedulers WITH (NOLOCK)
-WHERE scheduler_id < 255 OPTION (RECOMPILE);
-------
-
--- Sustained values above 10 suggest further investigation in that area
--- High Avg Task Counts are often caused by blocking/deadlocking or other resource contention
--- Sustained values above 1 suggest further investigation in that area
--- High Avg Runnable Task Counts are a good sign of CPU pressure
--- High Avg Pending DiskIO Counts are a sign of disk pressure
-
--- How to Do Some Very Basic SQL Server Monitoring
--- https://bit.ly/30IRla0
-
-
-
-
--- Detect blocking (run multiple times)  (Query 41) (Detect Blocking)
-SELECT t1.resource_type AS [lock type], DB_NAME(resource_database_id) AS [database],
-t1.resource_associated_entity_id AS [blk object],t1.request_mode AS [lock req],  -- lock requested
-t1.request_session_id AS [waiter sid], t2.wait_duration_ms AS [wait time],       -- spid of waiter  
-(SELECT [text] FROM sys.dm_exec_requests AS r WITH (NOLOCK)                      -- get sql for waiter
-CROSS APPLY sys.dm_exec_sql_text(r.[sql_handle]) 
-WHERE r.session_id = t1.request_session_id) AS [waiter_batch],
-(SELECT SUBSTRING(qt.[text],r.statement_start_offset/2, 
-    (CASE WHEN r.statement_end_offset = -1 
-    THEN LEN(CONVERT(nvarchar(max), qt.[text])) * 2 
-    ELSE r.statement_end_offset END - r.statement_start_offset)/2) 
-FROM sys.dm_exec_requests AS r WITH (NOLOCK)
-CROSS APPLY sys.dm_exec_sql_text(r.[sql_handle]) AS qt
-WHERE r.session_id = t1.request_session_id) AS [waiter_stmt],					-- statement blocked
-t2.blocking_session_id AS [blocker sid],										-- spid of blocker
-(SELECT [text] FROM sys.sysprocesses AS p										-- get sql for blocker
-CROSS APPLY sys.dm_exec_sql_text(p.[sql_handle]) 
-WHERE p.spid = t2.blocking_session_id) AS [blocker_batch]
-FROM sys.dm_tran_locks AS t1 WITH (NOLOCK)
-INNER JOIN sys.dm_os_waiting_tasks AS t2 WITH (NOLOCK)
-ON t1.lock_owner_address = t2.resource_address OPTION (RECOMPILE);
-------
-
--- Helps troubleshoot blocking and deadlocking issues
--- The results will change from second to second on a busy system
--- You should run this query multiple times when you see signs of blocking
-
-
-
--- Get CPU Utilization History for last 256 minutes (in one minute intervals)  (Query 42) (CPU Utilization History)
-DECLARE @ts_now bigint = (SELECT ms_ticks FROM sys.dm_os_sys_info WITH (NOLOCK)); 
-
-SELECT TOP(256) SQLProcessUtilization AS [SQL Server Process CPU Utilization], 
-               SystemIdle AS [System Idle Process], 
-               100 - SystemIdle - SQLProcessUtilization AS [Other Process CPU Utilization], 
-               DATEADD(ms, -1 * (@ts_now - [timestamp]), GETDATE()) AS [Event Time] 
-FROM (SELECT record.value('(./Record/@id)[1]', 'int') AS record_id, 
-              record.value('(./Record/SchedulerMonitorEvent/SystemHealth/SystemIdle)[1]', 'int') 
-                      AS [SystemIdle], 
-              record.value('(./Record/SchedulerMonitorEvent/SystemHealth/ProcessUtilization)[1]', 'int') 
-                      AS [SQLProcessUtilization], [timestamp] 
-         FROM (SELECT [timestamp], CONVERT(xml, record) AS [record] 
-                      FROM sys.dm_os_ring_buffers WITH (NOLOCK)
-                      WHERE ring_buffer_type = N'RING_BUFFER_SCHEDULER_MONITOR' 
-                      AND record LIKE N'%<SystemHealth>%') AS x) AS y 
-ORDER BY record_id DESC OPTION (RECOMPILE);
-------
-
--- Look at the trend over the entire period 
--- Also look at high sustained 'Other Process' CPU Utilization values
--- Note: This query sometimes gives inaccurate results (negative values)
--- on high core count (> 64 cores) systems
-
-
-
--- Get top total worker time queries for entire instance (Query 43) (Top Worker Time Queries)
-SELECT TOP(50) DB_NAME(t.[dbid]) AS [Database Name], 
-REPLACE(REPLACE(LEFT(t.[text], 255), CHAR(10),''), CHAR(13),'') AS [Short Query Text],  
-qs.total_worker_time AS [Total Worker Time], qs.min_worker_time AS [Min Worker Time],
-qs.total_worker_time/qs.execution_count AS [Avg Worker Time], 
-qs.max_worker_time AS [Max Worker Time], 
-qs.min_elapsed_time AS [Min Elapsed Time], 
-qs.total_elapsed_time/qs.execution_count AS [Avg Elapsed Time], 
-qs.max_elapsed_time AS [Max Elapsed Time],
-qs.min_logical_reads AS [Min Logical Reads],
-qs.total_logical_reads/qs.execution_count AS [Avg Logical Reads],
-qs.max_logical_reads AS [Max Logical Reads], 
-qs.execution_count AS [Execution Count],
-CASE WHEN CONVERT(nvarchar(max), qp.query_plan) COLLATE Latin1_General_BIN2 LIKE N'%<MissingIndexes>%' THEN 1 ELSE 0 END AS [Has Missing Index],
-qs.creation_time AS [Creation Time]
---,t.[text] AS [Query Text], qp.query_plan AS [Query Plan] -- uncomment out these columns if not copying results to Excel
-FROM sys.dm_exec_query_stats AS qs WITH (NOLOCK)
-CROSS APPLY sys.dm_exec_sql_text(plan_handle) AS t 
-CROSS APPLY sys.dm_exec_query_plan(plan_handle) AS qp 
-ORDER BY qs.total_worker_time DESC OPTION (RECOMPILE);
-------
-
-
--- Helps you find the most expensive queries from a CPU perspective across the entire instance
--- Can also help track down parameter sniffing issues
-
-
-
-
--- Find single-use, ad-hoc and prepared queries that are bloating the plan cache  (Query 47) (Ad hoc Queries)
-SELECT TOP(50) DB_NAME(t.[dbid]) AS [Database Name], t.[text] AS [Query Text], 
-cp.objtype AS [Object Type], cp.cacheobjtype AS [Cache Object Type],  
-cp.size_in_bytes/1024 AS [Plan Size in KB]
-FROM sys.dm_exec_cached_plans AS cp WITH (NOLOCK)
-CROSS APPLY sys.dm_exec_sql_text(plan_handle) AS t
-WHERE cp.cacheobjtype = N'Compiled Plan' 
-AND cp.objtype IN (N'Adhoc', N'Prepared') 
-AND cp.usecounts = 1
-ORDER BY cp.size_in_bytes DESC, DB_NAME(t.[dbid]) OPTION (RECOMPILE);
-------
-
--- Gives you the text, type and size of single-use ad-hoc and prepared queries that waste space in the plan cache
--- Enabling 'optimize for ad hoc workloads' for the instance can help (SQL Server 2008 and above only)
--- Running DBCC FREESYSTEMCACHE ('SQL Plans') periodically may be required to better control this
--- Enabling forced parameterization for the database can help, but test first!
-
--- Plan cache, adhoc workloads and clearing the single-use plan cache bloat
--- https://bit.ly/2EfYOkl
-
-
--- Get top total logical reads queries for entire instance (Query 48) (Top Logical Reads Queries)
-SELECT TOP(50) DB_NAME(t.[dbid]) AS [Database Name],
-REPLACE(REPLACE(LEFT(t.[text], 255), CHAR(10),''), CHAR(13),'') AS [Short Query Text], 
-qs.total_logical_reads AS [Total Logical Reads],
-qs.min_logical_reads AS [Min Logical Reads],
-qs.total_logical_reads/qs.execution_count AS [Avg Logical Reads],
-qs.max_logical_reads AS [Max Logical Reads],   
-qs.min_worker_time AS [Min Worker Time],
-qs.total_worker_time/qs.execution_count AS [Avg Worker Time], 
-qs.max_worker_time AS [Max Worker Time], 
-qs.min_elapsed_time AS [Min Elapsed Time], 
-qs.total_elapsed_time/qs.execution_count AS [Avg Elapsed Time], 
-qs.max_elapsed_time AS [Max Elapsed Time],
-qs.execution_count AS [Execution Count], 
-CASE WHEN CONVERT(nvarchar(max), qp.query_plan) COLLATE Latin1_General_BIN2 LIKE N'%<MissingIndexes>%' THEN 1 ELSE 0 END AS [Has Missing Index],
-qs.creation_time AS [Creation Time]
---,t.[text] AS [Complete Query Text], qp.query_plan AS [Query Plan] -- uncomment out these columns if not copying results to Excel
-FROM sys.dm_exec_query_stats AS qs WITH (NOLOCK)
-CROSS APPLY sys.dm_exec_sql_text(plan_handle) AS t 
-CROSS APPLY sys.dm_exec_query_plan(plan_handle) AS qp 
-ORDER BY qs.total_logical_reads DESC OPTION (RECOMPILE);
-------
-
-
--- Helps you find the most expensive queries from a memory perspective across the entire instance
--- Can also help track down parameter sniffing issues
-
-
--- Get top average elapsed time queries for entire instance (Query 49) (Top Avg Elapsed Time Queries)
-SELECT TOP(50) DB_NAME(t.[dbid]) AS [Database Name], 
-REPLACE(REPLACE(LEFT(t.[text], 255), CHAR(10),''), CHAR(13),'') AS [Short Query Text],  
-qs.total_elapsed_time/qs.execution_count AS [Avg Elapsed Time],
-qs.min_elapsed_time, qs.max_elapsed_time, qs.last_elapsed_time,
-qs.execution_count AS [Execution Count],  
-qs.total_logical_reads/qs.execution_count AS [Avg Logical Reads], 
-qs.total_physical_reads/qs.execution_count AS [Avg Physical Reads], 
-qs.total_worker_time/qs.execution_count AS [Avg Worker Time],
-CASE WHEN CONVERT(nvarchar(max), qp.query_plan) COLLATE Latin1_General_BIN2 LIKE N'%<MissingIndexes>%' THEN 1 ELSE 0 END AS [Has Missing Index],
-qs.creation_time AS [Creation Time]
---,t.[text] AS [Complete Query Text], qp.query_plan AS [Query Plan] -- uncomment out these columns if not copying results to Excel
-FROM sys.dm_exec_query_stats AS qs WITH (NOLOCK)
-CROSS APPLY sys.dm_exec_sql_text(plan_handle) AS t 
-CROSS APPLY sys.dm_exec_query_plan(plan_handle) AS qp 
-ORDER BY qs.total_elapsed_time/qs.execution_count DESC OPTION (RECOMPILE);
-------
-
--- Helps you find the highest average elapsed time queries across the entire instance
--- Can also help track down parameter sniffing issues
-
-
--- Look at UDF execution statistics (Query 50) (UDF Stats by DB)
-SELECT TOP (25) DB_NAME(database_id) AS [Database Name], 
-		   OBJECT_NAME(object_id, database_id) AS [Function Name],
-		   total_worker_time, execution_count, total_elapsed_time,  
-           total_elapsed_time/execution_count AS [avg_elapsed_time],  
-           last_elapsed_time, last_execution_time, cached_time, [type_desc] 
-FROM sys.dm_exec_function_stats WITH (NOLOCK) 
-ORDER BY total_worker_time DESC OPTION (RECOMPILE);
-------
-
--- sys.dm_exec_function_stats (Transact-SQL)
--- https://bit.ly/2q1Q6BM
-
--- Showplan Enhancements for UDFs
--- https://bit.ly/2LVqiQ1
-
-
-
-
-
--- Database specific queries *****************************************************************
-
--- **** Please switch to a user database that you are interested in! *****
---USE YourDatabaseName; -- make sure to change to an actual database on your instance, not the master system database
---GO
-
--- Individual File Sizes and space available for current database  (Query 51) (File Sizes and Space)
-SELECT f.name AS [File Name] , f.physical_name AS [Physical Name], 
-CAST((f.size/128.0) AS DECIMAL(15,2)) AS [Total Size in MB],
-CAST(f.size/128.0 - CAST(FILEPROPERTY(f.name, 'SpaceUsed') AS int)/128.0 AS DECIMAL(15,2)) 
-AS [Available Space In MB],
-CAST((f.size/128.0) AS DECIMAL(15,2)) - 
-CAST(f.size/128.0 - CAST(FILEPROPERTY(f.name, 'SpaceUsed') AS int)/128.0 AS DECIMAL(15,2)) AS [Used Space in MB],
-f.[file_id], fg.name AS [Filegroup Name],
-f.is_percent_growth, f.growth, fg.is_default, fg.is_read_only, 
-fg.is_autogrow_all_files
-FROM sys.database_files AS f WITH (NOLOCK) 
-LEFT OUTER JOIN sys.filegroups AS fg WITH (NOLOCK)
-ON f.data_space_id = fg.data_space_id
-ORDER BY f.[file_id] OPTION (RECOMPILE);
-------
-
--- Look at how large and how full the files are and where they are located
--- Make sure the transaction log is not full!!
-
--- is_autogrow_all_files was new for SQL Server 2016. Equivalent to TF 1117 for user databases
-
--- SQL Server 2016: Changes in default behavior for autogrow and allocations for tempdb and user databases
--- https://bit.ly/2evRZSR
-
-
--- Log space usage for current database  (Query 52) (Log Space Usage)
-SELECT DB_NAME(lsu.database_id) AS [Database Name], db.recovery_model_desc AS [Recovery Model],
-		CAST(lsu.total_log_size_in_bytes/1048576.0 AS DECIMAL(10, 2)) AS [Total Log Space (MB)],
-		CAST(lsu.used_log_space_in_bytes/1048576.0 AS DECIMAL(10, 2)) AS [Used Log Space (MB)], 
-		CAST(lsu.used_log_space_in_percent AS DECIMAL(10, 2)) AS [Used Log Space %],
-		CAST(lsu.log_space_in_bytes_since_last_backup/1048576.0 AS DECIMAL(10, 2)) AS [Used Log Space Since Last Backup (MB)],
-		db.log_reuse_wait_desc		 
-FROM sys.dm_db_log_space_usage AS lsu WITH (NOLOCK)
-INNER JOIN sys.databases AS db WITH (NOLOCK)
-ON lsu.database_id = db.database_id
-OPTION (RECOMPILE);
-------
-
--- Look at log file size and usage, along with the log reuse wait description for the current database
-
--- sys.dm_db_log_space_usage (Transact-SQL)
--- https://bit.ly/2H4MQw9
-
-
--- Status of last VLF for current database  (Query 53) (Last VLF Status)
-SELECT TOP(1) DB_NAME(li.database_id) AS [Database Name], li.[file_id],
-              li.vlf_size_mb, li.vlf_sequence_number, li.vlf_active, li.vlf_status
-FROM sys.dm_db_log_info(DB_ID()) AS li 
-ORDER BY vlf_sequence_number DESC OPTION (RECOMPILE);
-------
-
--- Determine whether you will be able to shrink the transaction log file
-
--- vlf_status Values
--- 0 is inactive 
--- 1 is initialized but unused 
--- 2 is active
-
--- sys.dm_db_log_info (Transact-SQL)
--- https://bit.ly/2EQUU1v
-
-
-
--- Get database scoped configuration values for current database (Query 54) (Database-scoped Configurations)
-SELECT configuration_id, name, [value] AS [value_for_primary], value_for_secondary
-FROM sys.database_scoped_configurations WITH (NOLOCK) OPTION (RECOMPILE);
-------
-
--- This lets you see the value of these new properties for the current database
-
--- Clear plan cache for current database
--- ALTER DATABASE SCOPED CONFIGURATION CLEAR PROCEDURE_CACHE;
-
--- ALTER DATABASE SCOPED CONFIGURATION (Transact-SQL)
--- https://bit.ly/2sOH7nb
-
-
--- I/O Statistics by file for the current database  (Query 55) (IO Stats By File)
-SELECT DB_NAME(DB_ID()) AS [Database Name], df.name AS [Logical Name], vfs.[file_id], df.type_desc,
-df.physical_name AS [Physical Name], CAST(vfs.size_on_disk_bytes/1048576.0 AS DECIMAL(15, 2)) AS [Size on Disk (MB)],
-vfs.num_of_reads, vfs.num_of_writes, vfs.io_stall_read_ms, vfs.io_stall_write_ms,
-CAST(100. * vfs.io_stall_read_ms/(vfs.io_stall_read_ms + vfs.io_stall_write_ms) AS DECIMAL(10,1)) AS [IO Stall Reads Pct],
-CAST(100. * vfs.io_stall_write_ms/(vfs.io_stall_write_ms + vfs.io_stall_read_ms) AS DECIMAL(10,1)) AS [IO Stall Writes Pct],
-(vfs.num_of_reads + vfs.num_of_writes) AS [Writes + Reads], 
-CAST(vfs.num_of_bytes_read/1048576.0 AS DECIMAL(15, 2)) AS [MB Read], 
-CAST(vfs.num_of_bytes_written/1048576.0 AS DECIMAL(15, 2)) AS [MB Written],
-CAST(100. * vfs.num_of_reads/(vfs.num_of_reads + vfs.num_of_writes) AS DECIMAL(15,1)) AS [# Reads Pct],
-CAST(100. * vfs.num_of_writes/(vfs.num_of_reads + vfs.num_of_writes) AS DECIMAL(15,1)) AS [# Write Pct],
-CAST(100. * vfs.num_of_bytes_read/(vfs.num_of_bytes_read + vfs.num_of_bytes_written) AS DECIMAL(15,1)) AS [Read Bytes Pct],
-CAST(100. * vfs.num_of_bytes_written/(vfs.num_of_bytes_read + vfs.num_of_bytes_written) AS DECIMAL(15,1)) AS [Written Bytes Pct]
-FROM sys.dm_io_virtual_file_stats(DB_ID(), NULL) AS vfs
-INNER JOIN sys.database_files AS df WITH (NOLOCK)
-ON vfs.[file_id]= df.[file_id] OPTION (RECOMPILE);
-------
-
--- This helps you characterize your workload better from an I/O perspective for this database
--- It helps you determine whether you has an OLTP or DW/DSS type of workload
-
-
-
--- Get most frequently executed queries for this database (Query 56) (Query Execution Counts)
-SELECT TOP(50) LEFT(t.[text], 50) AS [Short Query Text], qs.execution_count AS [Execution Count],
-qs.total_logical_reads AS [Total Logical Reads],
-qs.total_logical_reads/qs.execution_count AS [Avg Logical Reads],
-qs.total_worker_time AS [Total Worker Time],
-qs.total_worker_time/qs.execution_count AS [Avg Worker Time], 
-qs.total_elapsed_time AS [Total Elapsed Time],
-qs.total_elapsed_time/qs.execution_count AS [Avg Elapsed Time],
-CASE WHEN CONVERT(nvarchar(max), qp.query_plan) COLLATE Latin1_General_BIN2 LIKE N'%<MissingIndexes>%' THEN 1 ELSE 0 END AS [Has Missing Index],
-qs.creation_time AS [Creation Time]
---,t.[text] AS [Complete Query Text], qp.query_plan AS [Query Plan] -- uncomment out these columns if not copying results to Excel
-FROM sys.dm_exec_query_stats AS qs WITH (NOLOCK)
-CROSS APPLY sys.dm_exec_sql_text(plan_handle) AS t 
-CROSS APPLY sys.dm_exec_query_plan(plan_handle) AS qp 
-WHERE t.dbid = DB_ID()
-ORDER BY qs.execution_count DESC OPTION (RECOMPILE);
-------
-
-
--- Queries 57 through 63 are the "Bad Man List" for stored procedures
-
--- Top Cached SPs By Execution Count (Query 57) (SP Execution Counts)
-SELECT TOP(100) p.name AS [SP Name], qs.execution_count AS [Execution Count],
-ISNULL(qs.execution_count/DATEDIFF(Minute, qs.cached_time, GETDATE()), 0) AS [Calls/Minute],
-qs.total_elapsed_time/qs.execution_count AS [Avg Elapsed Time],
-qs.total_worker_time/qs.execution_count AS [Avg Worker Time],    
-qs.total_logical_reads/qs.execution_count AS [Avg Logical Reads],
-CASE WHEN CONVERT(nvarchar(max), qp.query_plan) COLLATE Latin1_General_BIN2 LIKE N'%<MissingIndexes>%' THEN 1 ELSE 0 END AS [Has Missing Index],
-FORMAT(qs.last_execution_time, 'yyyy-MM-dd HH:mm:ss', 'en-US') AS [Last Execution Time], 
-FORMAT(qs.cached_time, 'yyyy-MM-dd HH:mm:ss', 'en-US') AS [Plan Cached Time]
--- ,qp.query_plan AS [Query Plan] -- Uncomment if you want the Query Plan
-FROM sys.procedures AS p WITH (NOLOCK)
-INNER JOIN sys.dm_exec_procedure_stats AS qs WITH (NOLOCK)
-ON p.[object_id] = qs.[object_id]
-CROSS APPLY sys.dm_exec_query_plan(qs.plan_handle) AS qp
-WHERE qs.database_id = DB_ID()
-AND DATEDIFF(Minute, qs.cached_time, GETDATE()) > 0
-ORDER BY qs.execution_count DESC OPTION (RECOMPILE);
-------
-
--- Tells you which cached stored procedures are called the most often
--- This helps you characterize and baseline your workload
--- It also helps you find possible caching opportunities
-
-
--- Top Cached SPs By Avg Elapsed Time (Query 58) (SP Avg Elapsed Time)
-SELECT TOP(25) p.name AS [SP Name], qs.min_elapsed_time, qs.total_elapsed_time/qs.execution_count AS [avg_elapsed_time], 
-qs.max_elapsed_time, qs.last_elapsed_time, qs.total_elapsed_time, qs.execution_count, 
-ISNULL(qs.execution_count/DATEDIFF(Minute, qs.cached_time, GETDATE()), 0) AS [Calls/Minute], 
-qs.total_worker_time/qs.execution_count AS [AvgWorkerTime], 
-qs.total_worker_time AS [TotalWorkerTime],
-CASE WHEN CONVERT(nvarchar(max), qp.query_plan) COLLATE Latin1_General_BIN2 LIKE N'%<MissingIndexes>%' THEN 1 ELSE 0 END AS [Has Missing Index],
-FORMAT(qs.last_execution_time, 'yyyy-MM-dd HH:mm:ss', 'en-US') AS [Last Execution Time], 
-FORMAT(qs.cached_time, 'yyyy-MM-dd HH:mm:ss', 'en-US') AS [Plan Cached Time]
--- ,qp.query_plan AS [Query Plan] -- Uncomment if you want the Query Plan
-FROM sys.procedures AS p WITH (NOLOCK)
-INNER JOIN sys.dm_exec_procedure_stats AS qs WITH (NOLOCK)
-ON p.[object_id] = qs.[object_id]
-CROSS APPLY sys.dm_exec_query_plan(qs.plan_handle) AS qp
-WHERE qs.database_id = DB_ID()
-AND DATEDIFF(Minute, qs.cached_time, GETDATE()) > 0
-ORDER BY avg_elapsed_time DESC OPTION (RECOMPILE);
-------
-
--- This helps you find high average elapsed time cached stored procedures that
--- may be easy to optimize with standard query tuning techniques
-
-
-
--- Top Cached SPs By Total Worker time. Worker time relates to CPU cost  (Query 59) (SP Worker Time)
-SELECT TOP(25) p.name AS [SP Name], qs.total_worker_time AS [TotalWorkerTime], 
-qs.total_worker_time/qs.execution_count AS [AvgWorkerTime], qs.execution_count, 
-ISNULL(qs.execution_count/DATEDIFF(Minute, qs.cached_time, GETDATE()), 0) AS [Calls/Minute],
-qs.total_elapsed_time, qs.total_elapsed_time/qs.execution_count AS [avg_elapsed_time],
-CASE WHEN CONVERT(nvarchar(max), qp.query_plan) COLLATE Latin1_General_BIN2 LIKE N'%<MissingIndexes>%' THEN 1 ELSE 0 END AS [Has Missing Index],
-FORMAT(qs.last_execution_time, 'yyyy-MM-dd HH:mm:ss', 'en-US') AS [Last Execution Time], 
-FORMAT(qs.cached_time, 'yyyy-MM-dd HH:mm:ss', 'en-US') AS [Plan Cached Time]
--- ,qp.query_plan AS [Query Plan] -- Uncomment if you want the Query Plan
-FROM sys.procedures AS p WITH (NOLOCK)
-INNER JOIN sys.dm_exec_procedure_stats AS qs WITH (NOLOCK)
-ON p.[object_id] = qs.[object_id]
-CROSS APPLY sys.dm_exec_query_plan(qs.plan_handle) AS qp
-WHERE qs.database_id = DB_ID()
-AND DATEDIFF(Minute, qs.cached_time, GETDATE()) > 0
-ORDER BY qs.total_worker_time DESC OPTION (RECOMPILE);
-------
-
--- This helps you find the most expensive cached stored procedures from a CPU perspective
--- You should look at this if you see signs of CPU pressure
-
-
--- Top Cached SPs By Total Logical Reads. Logical reads relate to memory pressure  (Query 60) (SP Logical Reads)
-SELECT TOP(25) p.name AS [SP Name], qs.total_logical_reads AS [TotalLogicalReads], 
-qs.total_logical_reads/qs.execution_count AS [AvgLogicalReads],qs.execution_count, 
-ISNULL(qs.execution_count/DATEDIFF(Minute, qs.cached_time, GETDATE()), 0) AS [Calls/Minute], 
-qs.total_elapsed_time, qs.total_elapsed_time/qs.execution_count AS [avg_elapsed_time],
-CASE WHEN CONVERT(nvarchar(max), qp.query_plan) COLLATE Latin1_General_BIN2 LIKE N'%<MissingIndexes>%' THEN 1 ELSE 0 END AS [Has Missing Index],
-FORMAT(qs.last_execution_time, 'yyyy-MM-dd HH:mm:ss', 'en-US') AS [Last Execution Time], 
-FORMAT(qs.cached_time, 'yyyy-MM-dd HH:mm:ss', 'en-US') AS [Plan Cached Time]
--- ,qp.query_plan AS [Query Plan] -- Uncomment if you want the Query Plan
-FROM sys.procedures AS p WITH (NOLOCK)
-INNER JOIN sys.dm_exec_procedure_stats AS qs WITH (NOLOCK)
-ON p.[object_id] = qs.[object_id]
-CROSS APPLY sys.dm_exec_query_plan(qs.plan_handle) AS qp
-WHERE qs.database_id = DB_ID()
-AND DATEDIFF(Minute, qs.cached_time, GETDATE()) > 0
-ORDER BY qs.total_logical_reads DESC OPTION (RECOMPILE);
-------
-
--- This helps you find the most expensive cached stored procedures from a memory perspective
--- You should look at this if you see signs of memory pressure
-
-
--- Top Cached SPs By Total Physical Reads. Physical reads relate to disk read I/O pressure  (Query 61) (SP Physical Reads)
-SELECT TOP(25) p.name AS [SP Name],qs.total_physical_reads AS [TotalPhysicalReads], 
-qs.total_physical_reads/qs.execution_count AS [AvgPhysicalReads], qs.execution_count, 
-qs.total_logical_reads,qs.total_elapsed_time, qs.total_elapsed_time/qs.execution_count AS [avg_elapsed_time],
-CASE WHEN CONVERT(nvarchar(max), qp.query_plan) COLLATE Latin1_General_BIN2 LIKE N'%<MissingIndexes>%' THEN 1 ELSE 0 END AS [Has Missing Index],
-FORMAT(qs.last_execution_time, 'yyyy-MM-dd HH:mm:ss', 'en-US') AS [Last Execution Time], 
-FORMAT(qs.cached_time, 'yyyy-MM-dd HH:mm:ss', 'en-US') AS [Plan Cached Time]
--- ,qp.query_plan AS [Query Plan] -- Uncomment if you want the Query Plan 
-FROM sys.procedures AS p WITH (NOLOCK)
-INNER JOIN sys.dm_exec_procedure_stats AS qs WITH (NOLOCK)
-ON p.[object_id] = qs.[object_id]
-CROSS APPLY sys.dm_exec_query_plan(qs.plan_handle) AS qp
-WHERE qs.database_id = DB_ID()
-AND qs.total_physical_reads > 0
-ORDER BY qs.total_physical_reads DESC, qs.total_logical_reads DESC OPTION (RECOMPILE);
-------
-
--- This helps you find the most expensive cached stored procedures from a read I/O perspective
--- You should look at this if you see signs of I/O pressure or of memory pressure
-       
-
-
--- Top Cached SPs By Total Logical Writes (Query 62) (SP Logical Writes)
--- Logical writes relate to both memory and disk I/O pressure 
-SELECT TOP(25) p.name AS [SP Name], qs.total_logical_writes AS [TotalLogicalWrites], 
-qs.total_logical_writes/qs.execution_count AS [AvgLogicalWrites], qs.execution_count,
-ISNULL(qs.execution_count/DATEDIFF(Minute, qs.cached_time, GETDATE()), 0) AS [Calls/Minute],
-qs.total_elapsed_time, qs.total_elapsed_time/qs.execution_count AS [avg_elapsed_time],
-CASE WHEN CONVERT(nvarchar(max), qp.query_plan) COLLATE Latin1_General_BIN2 LIKE N'%<MissingIndexes>%' THEN 1 ELSE 0 END AS [Has Missing Index], 
-FORMAT(qs.last_execution_time, 'yyyy-MM-dd HH:mm:ss', 'en-US') AS [Last Execution Time], 
-FORMAT(qs.cached_time, 'yyyy-MM-dd HH:mm:ss', 'en-US') AS [Plan Cached Time]
--- ,qp.query_plan AS [Query Plan] -- Uncomment if you want the Query Plan 
-FROM sys.procedures AS p WITH (NOLOCK)
-INNER JOIN sys.dm_exec_procedure_stats AS qs WITH (NOLOCK)
-ON p.[object_id] = qs.[object_id]
-CROSS APPLY sys.dm_exec_query_plan(qs.plan_handle) AS qp
-WHERE qs.database_id = DB_ID()
-AND qs.total_logical_writes > 0
-AND DATEDIFF(Minute, qs.cached_time, GETDATE()) > 0
-ORDER BY qs.total_logical_writes DESC OPTION (RECOMPILE);
-------
-
--- This helps you find the most expensive cached stored procedures from a write I/O perspective
--- You should look at this if you see signs of I/O pressure or of memory pressure
-
-
-
--- Cached SPs Missing Indexes by Execution Count (Query 63) (SP Missing Index)
-SELECT TOP(25) p.name AS [SP Name], qs.execution_count AS [Execution Count],
-ISNULL(qs.execution_count/DATEDIFF(Minute, qs.cached_time, GETDATE()), 0) AS [Calls/Minute],
-qs.total_elapsed_time/qs.execution_count AS [Avg Elapsed Time],
-qs.total_worker_time/qs.execution_count AS [Avg Worker Time],    
-qs.total_logical_reads/qs.execution_count AS [Avg Logical Reads],
-FORMAT(qs.last_execution_time, 'yyyy-MM-dd HH:mm:ss', 'en-US') AS [Last Execution Time], 
-FORMAT(qs.cached_time, 'yyyy-MM-dd HH:mm:ss', 'en-US') AS [Plan Cached Time]
--- ,qp.query_plan AS [Query Plan] -- Uncomment if you want the Query Plan
-FROM sys.procedures AS p WITH (NOLOCK)
-INNER JOIN sys.dm_exec_procedure_stats AS qs WITH (NOLOCK)
-ON p.[object_id] = qs.[object_id]
-CROSS APPLY sys.dm_exec_query_plan(qs.plan_handle) AS qp
-WHERE qs.database_id = DB_ID()
-AND DATEDIFF(Minute, qs.cached_time, GETDATE()) > 0
-AND CONVERT(nvarchar(max), qp.query_plan) COLLATE Latin1_General_BIN2 LIKE N'%<MissingIndexes>%'
-ORDER BY qs.execution_count DESC OPTION (RECOMPILE);
-------
-
--- This helps you find the most frequently executed cached stored procedures that have missing index warnings
--- This can often help you find index tuning candidates
-
-
-
--- Lists the top statements by average input/output usage for the current database  (Query 64) (Top IO Statements)
-SELECT TOP(50) OBJECT_NAME(qt.objectid, dbid) AS [SP Name],
-(qs.total_logical_reads + qs.total_logical_writes) /qs.execution_count AS [Avg IO], qs.execution_count AS [Execution Count],
-SUBSTRING(qt.[text],qs.statement_start_offset/2, 
-	(CASE 
-		WHEN qs.statement_end_offset = -1 
-	 THEN LEN(CONVERT(nvarchar(max), qt.[text])) * 2 
-		ELSE qs.statement_end_offset 
-	 END - qs.statement_start_offset)/2) AS [Query Text]	
-FROM sys.dm_exec_query_stats AS qs WITH (NOLOCK)
-CROSS APPLY sys.dm_exec_sql_text(qs.sql_handle) AS qt
-WHERE qt.[dbid] = DB_ID()
-ORDER BY [Avg IO] DESC OPTION (RECOMPILE);
-------
-
--- Helps you find the most expensive statements for I/O by SP
-
-
-
--- Possible Bad NC Indexes (writes > reads)  (Query 65) (Bad NC Indexes)
-SELECT SCHEMA_NAME(o.[schema_id]) AS [Schema Name], 
-OBJECT_NAME(s.[object_id]) AS [Table Name],
-i.name AS [Index Name], i.index_id, 
-i.is_disabled, i.is_hypothetical, i.has_filter, i.fill_factor,
-s.user_updates AS [Total Writes], s.user_seeks + s.user_scans + s.user_lookups AS [Total Reads],
-s.user_updates - (s.user_seeks + s.user_scans + s.user_lookups) AS [Difference]
-FROM sys.dm_db_index_usage_stats AS s WITH (NOLOCK)
-INNER JOIN sys.indexes AS i WITH (NOLOCK)
-ON s.[object_id] = i.[object_id]
-AND i.index_id = s.index_id
-INNER JOIN sys.objects AS o WITH (NOLOCK)
-ON i.[object_id] = o.[object_id]
-WHERE OBJECTPROPERTY(s.[object_id],'IsUserTable') = 1
-AND s.database_id = DB_ID()
-AND s.user_updates > (s.user_seeks + s.user_scans + s.user_lookups)
-AND i.index_id > 1 AND i.[type_desc] = N'NONCLUSTERED'
-AND i.is_primary_key = 0 AND i.is_unique_constraint = 0 AND i.is_unique = 0
-ORDER BY [Difference] DESC, [Total Writes] DESC, [Total Reads] ASC OPTION (RECOMPILE);
-------
-
--- Look for indexes with high numbers of writes and zero or very low numbers of reads
--- Consider your complete workload, and how long your instance has been running
--- Investigate further before dropping an index!
-
-
--- Missing Indexes for current database by Index Advantage  (Query 66) (Missing Indexes)
-SELECT DISTINCT CONVERT(decimal(18,2), migs.user_seeks * migs.avg_total_user_cost * (migs.avg_user_impact * 0.01)) AS [index_advantage], 
-migs.last_user_seek, mid.[statement] AS [Database.Schema.Table],
-mid.equality_columns, mid.inequality_columns, mid.included_columns,
-migs.user_seeks, migs.avg_total_user_cost, migs.avg_user_impact,
-OBJECT_NAME(mid.[object_id]) AS [Table Name], p.rows AS [Table Rows]
-FROM sys.dm_db_missing_index_group_stats AS migs WITH (NOLOCK)
-INNER JOIN sys.dm_db_missing_index_groups AS mig WITH (NOLOCK)
-ON migs.group_handle = mig.index_group_handle
-INNER JOIN sys.dm_db_missing_index_details AS mid WITH (NOLOCK)
-ON mig.index_handle = mid.index_handle
-INNER JOIN sys.partitions AS p WITH (NOLOCK)
-ON p.[object_id] = mid.[object_id]
-WHERE mid.database_id = DB_ID()
-AND p.index_id < 2 
-ORDER BY index_advantage DESC OPTION (RECOMPILE);
-------
-
--- Look at index advantage, last user seek time, number of user seeks to help determine source and importance
--- SQL Server is overly eager to add included columns, so beware
--- Do not just blindly add indexes that show up from this query!!!
--- Håkan Winther has given me some great suggestions for this query
-
-
--- Find missing index warnings for cached plans in the current database  (Query 67) (Missing Index Warnings)
--- Note: This query could take some time on a busy instance
-SELECT TOP(25) OBJECT_NAME(objectid) AS [ObjectName], 
-               cp.objtype, cp.usecounts, cp.size_in_bytes, qp.query_plan
-FROM sys.dm_exec_cached_plans AS cp WITH (NOLOCK)
-CROSS APPLY sys.dm_exec_query_plan(cp.plan_handle) AS qp
-WHERE CAST(query_plan AS NVARCHAR(MAX)) LIKE N'%MissingIndex%'
-AND dbid = DB_ID()
-ORDER BY cp.usecounts DESC OPTION (RECOMPILE);
-------
-
--- Helps you connect missing indexes to specific stored procedures or queries
--- This can help you decide whether to add them or not
-
-
--- Breaks down buffers used by current database by object (table, index) in the buffer cache  (Query 68) (Buffer Usage)
--- Note: This query could take some time on a busy instance
-SELECT fg.name AS [Filegroup Name], SCHEMA_NAME(o.Schema_ID) AS [Schema Name],
-OBJECT_NAME(p.[object_id]) AS [Object Name], p.index_id, 
-CAST(COUNT(*)/128.0 AS DECIMAL(10, 2)) AS [Buffer size(MB)],  
-COUNT(*) AS [BufferCount], p.[Rows] AS [Row Count],
-p.data_compression_desc AS [Compression Type]
-FROM sys.allocation_units AS a WITH (NOLOCK)
-INNER JOIN sys.dm_os_buffer_descriptors AS b WITH (NOLOCK)
-ON a.allocation_unit_id = b.allocation_unit_id
-INNER JOIN sys.partitions AS p WITH (NOLOCK)
-ON a.container_id = p.hobt_id
-INNER JOIN sys.objects AS o WITH (NOLOCK)
-ON p.object_id = o.object_id
-INNER JOIN sys.database_files AS f WITH (NOLOCK)
-ON b.file_id = f.file_id
-INNER JOIN sys.filegroups AS fg WITH (NOLOCK)
-ON f.data_space_id = fg.data_space_id
-WHERE b.database_id = CONVERT(int, DB_ID())
-AND p.[object_id] > 100
-AND OBJECT_NAME(p.[object_id]) NOT LIKE N'plan_%'
-AND OBJECT_NAME(p.[object_id]) NOT LIKE N'sys%'
-AND OBJECT_NAME(p.[object_id]) NOT LIKE N'xml_index_nodes%'
-GROUP BY fg.name, o.Schema_ID, p.[object_id], p.index_id, 
-         p.data_compression_desc, p.[Rows]
-ORDER BY [BufferCount] DESC OPTION (RECOMPILE);
-------
-
--- Tells you what tables and indexes are using the most memory in the buffer cache
--- It can help identify possible candidates for data compression
-
-
--- Get Schema names, Table names, object size, row counts, and compression status for clustered index or heap  (Query 69) (Table Sizes)
-SELECT DB_NAME(DB_ID()) AS [Database Name], SCHEMA_NAME(o.Schema_ID) AS [Schema Name], 
-OBJECT_NAME(p.object_id) AS [Object Name],
-CAST(SUM(ps.reserved_page_count) * 8.0 / 1024 AS DECIMAL(19,2)) AS [Object Size (MB)],
-SUM(p.Rows) AS [Row Count], 
-p.data_compression_desc AS [Compression Type]
-FROM sys.objects AS o WITH (NOLOCK)
-INNER JOIN sys.partitions AS p WITH (NOLOCK)
-ON p.object_id = o.object_id
-INNER JOIN sys.dm_db_partition_stats AS ps WITH (NOLOCK)
-ON p.object_id = ps.object_id
-WHERE ps.index_id < 2 -- ignore the partitions from the non-clustered indexes if any
-AND p.index_id < 2    -- ignore the partitions from the non-clustered indexes if any
-AND o.type_desc = N'USER_TABLE'
-GROUP BY  SCHEMA_NAME(o.Schema_ID), p.object_id, ps.reserved_page_count, p.data_compression_desc
-ORDER BY SUM(ps.reserved_page_count) DESC, SUM(p.Rows) DESC OPTION (RECOMPILE);
-------
-
--- Gives you an idea of table sizes, and possible data compression opportunities
-
-
-
--- Get some key table properties (Query 70) (Table Properties)
-SELECT OBJECT_NAME(t.[object_id]) AS [ObjectName], p.[rows] AS [Table Rows], p.index_id, 
-       p.data_compression_desc AS [Index Data Compression],
-       t.create_date, t.lock_on_bulk_load, t.is_replicated, t.has_replication_filter, 
-       t.is_tracked_by_cdc, t.lock_escalation_desc, t.is_filetable, 
-	   t.is_memory_optimized, t.durability_desc, 
-	   t.temporal_type_desc, t.is_remote_data_archive_enabled, t.is_external -- new for SQL Server 2016
-FROM sys.tables AS t WITH (NOLOCK)
-INNER JOIN sys.partitions AS p WITH (NOLOCK)
-ON t.[object_id] = p.[object_id]
-WHERE OBJECT_NAME(t.[object_id]) NOT LIKE N'sys%'
-ORDER BY OBJECT_NAME(t.[object_id]), p.index_id OPTION (RECOMPILE);
-------
-
--- Gives you some good information about your tables
--- is_memory_optimized and durability_desc were new in SQL Server 2014
--- temporal_type_desc, is_remote_data_archive_enabled, is_external were new in SQL Server 2016
-
--- sys.tables (Transact-SQL)
--- https://bit.ly/2Gk7998
-
+-- micro sec
+ -- make sure that DB grants in dev,qa are not wiped after DB refresh from prod
+ IT Service Delivery - NOC <itservicedeliverynoc@acadianassetllc.mail.onmicrosoft.com>
+ 
+ sp_helplogins no access in prod or ror, use below to see roles for a user
+ EXEC sp_MSforeachdb 'USE ? SELECT r.name role_principal_name, m.name AS member_principal_name FROM sys.database_role_members rm JOIN sys.database_principals r    ON rm.role_principal_id = r.principal_id JOIN sys.database_principals m ON rm.member_principal_id = m.principal_id where m.name = ''ACADIAN\svc_ActiveFX'' '
+ use Optimizer   sp_helprotect NULL,'AAMTableauReportsRole'
+ 
+EXECUTE AS LOGIN = 'test'     EXECUTE AS USER = 'test'      SELECT SUSER_NAME() 'login',CURRENT_USER 'user';
+ 
+ -- Refresh automation post refresh git script after Snap refresh
+https://git.acadian-asset.com/DO/RefreshAutomation/-/tree/master/CORE
+
+-- ActiveFX user add drop exec dbo.SPacdAddNewUser @NewUserName = 'nvongsomphou' , @Role = 'OPS'    exec ActiveFX.[dbo].[SPacdDeleteUser] @UserName='jorel'
+-- SPacdAddNewUser fails for multiple roles, Use C:\acadian\dba\trading team\SPacdAddNewUser ActiveFX Multiple Roles OPS COMPLIANCE script.sql
+
+ ****  tp_process_bbh_fxlink_file    EXEC master.dbo.xp_smtp_sendmail     ****************
+ br$Kg%j3 svc_qaOrs
+ 
+ ---------------------------------------------------------------#### tempdb full issue---------------------------------------------------------------
+ select * from sys.dm_db_session_space_usage
+where session_id =63
+
+
+SELECT 
+(SUM(unallocated_extent_page_count)*1.0/128) AS [Free space(MB)]
+,(SUM(version_store_reserved_page_count)*1.0/128)  AS [Used Space by VersionStore(MB)]
+,(SUM(internal_object_reserved_page_count)*1.0/128)  AS [Used Space by InternalObjects(MB)]
+,(SUM(user_object_reserved_page_count)*1.0/128)  AS [Used Space by UserObjects(MB)]
+FROM tempdb.sys.dm_db_file_space_usage;
+
+SELECT 
+  DB_NAME(database_id) as 'Database Name',
+  reserved_page_count,
+  reserved_space_kb 
+FROM sys.dm_tran_version_store_space_usage;
+
+select
+t.transaction_id,t.name,t.transaction_type, t.transaction_state,
+s.transaction_id,s.session_id,
+s.elapsed_time_seconds/60/60.0 as hours_tran_has_been_open,  p.status, p.cmd
+from sys.dm_tran_active_transactions t
+  join sys.dm_tran_active_snapshot_database_transactions s
+     on t.transaction_id = s.transaction_id
+  join sys.sysprocesses p
+     on p.spid = s.session_id
+
+DBCC INPUTBUFFER(264)
+GO
+
+(@P0 varchar(8000))SELECT ATTR_PARAM.ATTR_NAME,ATTR_PARAM.ATTR_VALUE,ATTR_PARAM.ATTR_MODULE,ATTR_PARAM.COMMENTS,ATTR_PARAM.TECH_TTY_ID FROM ATTR_PARAM WHERE ATTR_PARAM.ATTR_NAME= @P0
+
+---------------------------------------------------------------------------------------------------------------------------------------------------------
+ 
+ 
+ 
+ https://www.sqlskills.com/blogs/paul/replication-preventing-log-reuse-but-no-replication-configured/
+ https://www.sqlskills.com/blogs/paul/importance-of-proper-transaction-log-size-management/
+ select name, log_reuse_wait_desc from sys.databases
+EXEC sp_removedbreplication 'BISAMDW'
+DBCC SHRINKFILE (DataFile1, 7);
+SET XACT_ABORT  ON
+begin
+declare @trancount int;
+begin try
+begin tran
+raiserror('Could not enqueue delete transaction for hinettt', 16, 1)
+select 1/0
+print 'in tran'
+commit;
+end try
+
+begin catch
+print @@trancount
+print 'in catch'
+--rollback;
+print @@trancount
+end catch
+
+end
+
+
+ 
+DECLARE @HinetTranId INT, @rc INT
+EXEC @rc = trading.dbo.SPPostActiveFXTrade @ActiveFXTradeId = 2635086, @HinetTranId = @HinetTranId output 
+SELECT 2635086 AFXTradeId, @HinetTranId HinetTranId, @rc rc
+ 
+ ***************ReplData.dbo.refIdentifier and ReplData.dbo.refSecurity  tables are sourced from bos-dbrnd02.reference database and replicated to ReplData on bos-dbcore01
+
+ -- extract role grants for a user ----------------------------------------------------------------------------------------------------
+SELECT 'EXEC sp_addrolemember ''' + DBRole.NAME + ''', ''' + DBUser.NAME + '''' AS '--Add Users to Database Roles--'
+FROM sys.database_principals DBUser
+INNER JOIN sys.database_role_members DBM ON DBM.member_principal_id = DBUser.principal_id
+INNER JOIN sys.database_principals DBRole ON DBRole.principal_id = DBM.role_principal_id
+and DBUser.NAME='ACADIAN\svc_actvbsqluser'
+--https://solutioncenter.apexsql.com/how-to-script-sql-server-logins-and-permissions/ 
+----------------------------------------------------------------------------------------------------------------------------------------------
+
+ --#################### Securables grants for a Database User ###################################################
+ use BISAMDW  -- replace with database name
+
+SELECT (case when state_desc like 'GRANT%' then 'GRANT' else state_desc end)
+  + ' ' + database_permissions.permission_name 
+  + CASE database_permissions.class_desc
+        WHEN 'SCHEMA' THEN ' ON SCHEMA::[' + schema_name(major_id) + ']'
+        WHEN 'OBJECT_OR_COLUMN' THEN ' ON ' 
+          + isnull('[' + schema_name(objects.schema_id) + '].', '') + '['
+          + (CASE WHEN minor_id = 0 THEN object_name(major_id)  + ']' COLLATE Latin1_General_CI_AS_KS_WS
+            ELSE (SELECT object_name(object_id) + '] (['+ name + '])'
+                  FROM sys.columns 
+                  WHERE object_id = database_permissions.major_id 
+                  AND column_id = database_permissions.minor_id) end)
+        WHEN 'DATABASE_PRINCIPAL' THEN ' ON USER::[' + USER_NAME(major_id) + ']'
+        WHEN 'DATABASE' Then ''
+        WHEN 'SERVICE_CONTRACT' then ' ON CONTRACT::[' 
+          + (select name 
+             from sys.service_contracts 
+             where service_contract_id = major_id) 
+          + ']'
+        ELSE ' <<' + database_permissions.class_desc + '>>'
+    END
+  + ' TO [' + database_principals.name + ']'
+  + (case when state_desc = 'GRANT_WITH_GRANT_OPTION' then ' WITH GRANT OPTION' else '' end)
+  COLLATE Latin1_General_CI_AS_KS_WS
+FROM sys.database_permissions
+inner JOIN sys.database_principals
+ON database_permissions.grantee_principal_id = database_principals.principal_id
+LEFT JOIN sys.objects
+ON objects.object_id = database_permissions.major_id
+WHERE database_permissions.major_id > 0
+AND database_principals.name='ACADIAN\Performance & Attribution Group'  -- replace with database username
+
+-- Output
+-- GRANT EXECUTE ON [dbo].[SPbisamGetAttributionsByType] TO [ACADIAN\Performance & Attribution Group]
+-- GRANT EXECUTE ON [dbo].[SPbisamGetFwdsOnWrongAccounts] TO [ACADIAN\Performance & Attribution Group]
+-- .................
+--###########################################################################################################
+ 
+ Use ActiveFX;  -- ADJUST DB NAME
+
+DECLARE @RoleName varchar(50) = 'AAMIFXImportServiceRole' --- PLACE ROLE NAME
+
+SELECT 'CREATE ROLE ' + @RoleName + ';'+ char(13)
+
+SELECT  'GRANT ' + prm.permission_name + ' ON [' + s.name + + '].[' + OBJECT_NAME(major_id) + '] TO [' + rol.name + '] ;' + char(13) COLLATE Latin1_General_CI_AS
+from sys.database_permissions prm join sys.database_principals rol on prm.grantee_principal_id = rol.principal_id
+JOIN sys.objects AS o  ON prm.major_id = o.object_id 
+JOIN sys.schemas AS s  ON o.schema_id = s.schema_id
+where rol.name = @RoleName
+ 
+ 
+DBCC SHOWFILESTATS        DBCC SQLPERF(LOGSPACE)            DBCC LOGINFO
+ 
+select * from performance.[dbo].[ChangeLog] order by ExecutedAt desc
+select * from Acadian.dbo.ChangeLog order by ExecutedAt desc
+select * from msdb.cicd.Jobs  where Branch='feature/TI-10407D' and AppName='/tods/database-mssql' order by ExecutedAt desc
+-- object change history
+select * from sysobjects order by crdate desc 
+ 
+select * from fn_my_permissions(null,'SERVER') 
+use db;
+select * from fn_my_permissions(null,'DATABASE')
+
+--List all effective permissions for securable class server
+EXECUTE AS LOGIN = 'test'
+Go
+SELECT SUSER_NAME() 'login',CURRENT_USER 'user';  
+SELECT * FROM fn_my_permissions(NULL, 'SERVER'); 
+Go
+EXECUTE AS USER = 'test'
+GO
+USE AdventureWorks2019
+GO
+SELECT * FROM fn_my_permissions(null, 'database'); 
+GO
+
+exec sp_helplogins 'ACADIAN\Sec) Portfolio Construction Group' 
+exec sp_helplogins 'ACADIAN\SQL_Developers' 
+
+grant execute on master.[dbo].[sp_who3] to [ACADIAN\SQL_Developers]
+grant execute on master.[dbo].[sp_who3] to [ACADIAN\SQLDev]
+
+---##################
+EXEC sp_MSforeachdb 'USE ? select db_name() db_name, object_name(c.object_id) object_name,c.name,c.system_type_id,t.name from sys.all_columns c inner join sys.types t on c.system_type_id=t.system_type_id where c.name  in (''order_id'',''trade_id'',''placement_id'') '
+EXEC sp_MSforeachdb 'USE ? select db_name(), object_name(c.object_id),c.name,c.system_type_id,t.name,* from sys.all_columns c inner join sys.types t on c.system_type_id=t.system_type_id where c.name  in (''order_id'',''trade_id'',''placement_id'') '
+---##################
+
+--######  ACADIAN\SQLServices in prod ACCADIAN\SQLDev in dev, used by gitlab BOS-HCPMS01  SQLCMD
+
+BACKUP DATABASE [ETLMetadata] TO  DISK = N'H:\BACKUP\EC2AMAZ-A9PIKDV\ETLMetadata\ETLMetadata_FULL_Backup_Jan25.bkp' WITH NOFORMAT, NOINIT,  NAME = N'ETLMetadata-Full Database Backup', SKIP, NOREWIND, NOUNLOAD,  STATS = 10
+-- BISAMDW backup tran log
+EXECUTE [dbo].[DatabaseBackup]
+	@Databases	= 'BISAMDW'			-- BISAMDW Database
+,	@Compress	= 'Y'				-- Use Backup Compression
+,	@Directory	= NULL				-- Backup to default Backup directory
+,	@BackupType	= 'LOG'				-- Transaction Log Backup
+,	@Verify		= 'N'				-- Don't verify the Backups (done on system databases only)
+,	@CleanupTime	= 188			-- Cleanup old Backups after 188 hours (just under 8 days) after the most recent backup is taken 
+,	@CleanupMode	= 'AFTER_BACKUP' -- Cleanup old Backups after the new backup has been created
+,	@CheckSum	= 'N'				-- Don't use Backup checksums
+,	@FileExtensionFull	= N'BAK'	-- We keep file extensions consistent with Acadian's existing backup file extensions
+,	@FileExtensionDiff	= N'DIFF'
+,	@FileExtensionLog	= N'TRN'
+,	@LogToTable	= 'Y'				-- Log commands executed to [master].[dbo].[CommandLog]
+
+DBCC SQLPERF (logspace) -- 0.8
+
+USE DataWarehouse
+SELECT total_log_size_in_bytes/1048576.0 AS [Total Log Size in Bytes],used_log_space_in_bytes/1048576.0 AS [Used Log Size in Bytes],used_log_space_in_percent [Used Log Space in %],
+ (total_log_size_in_bytes - used_log_space_in_bytes)/1048576.0 AS [Free log space in MB],log_space_in_bytes_since_last_backup/1048576.0 [Log Since Last Log Backup]
+FROM sys.dm_db_log_space_usage;
+
+
+-- Table partition Scheme and index details
+SELECT  t.name,i.name,i.type_desc,ps.name,sum(p.rows) row_count
+FROM sys.tables AS t JOIN sys.indexes AS i  ON t.[object_id] = i.[object_id]   
+JOIN sys.partition_schemes ps  ON i.data_space_id = ps.data_space_id   
+JOIN sys.partitions p ON i.object_id = p.OBJECT_ID AND i.index_id = p.index_id
+JOIN sys.allocation_units a ON p.partition_id = a.container_id
+WHERE ps.name = 'PS_BISAM_PORTFOLIO' and i.type=1 and SCHEMA_NAME(t.schema_id)='warehouse'
+and t.name not like '%_Archive'
+GROUP BY t.name,i.name,i.type_desc,ps.name order by row_count desc
+
+USE BISAMDW 
+EXEC sys.sp_cdc_stop_job @job_type = N'cleanup';  -- schedule to run M-F at 1 PM
+EXEC sys.sp_cdc_start_job @job_type = N'cleanup'; -- default job type is capture, so specifying no parameter works on CAPTURE job
+GO
+cdc.BISAMDW_capture --always runs and starts with sql agent
+
+
+-- procedure execution history
+select database_id,db_name(database_id),object_id,object_name(object_id),cached_time, last_execution_time, execution_count from sys.dm_exec_procedure_stats
+select database_id,db_name(database_id),object_id,object_name(object_id),cached_time, last_execution_time, execution_count from sys.dm_exec_procedure_stats where object_name(object_id)='SPrptHoldingsSnapshot'
+select * from master.[dbo].[dbaProcedureUsage] (nolock) where ProcName='SPrptHoldingsSnapshot'
+
+https://git.acadian-asset.com/trading-investments/crd/database-mssql/-/merge_requests/728/diffs
+https://git.acadian-asset.com/trading-investments/crd/database-mssql/-/blob/master/CORE/Acadian/AUX%20Scripts/Alter/crdTradeExport_Index.sql 
+USE [Acadian]
+GO
+
+IF NOT EXISTS(SELECT 1 FROM sys.indexes WHERE object_id = object_id('dbo.crdTradeExport') AND name ='idx_crdTradeExport_FUNDID_STATUS')
+BEGIN
+
+CREATE NONCLUSTERED INDEX [idx_crdTradeExport_FUNDID_STATUS]
+ON [dbo].[crdTradeExport] ([TRADE_DATE],[FUNDID],[STATUS])
+WITH (DATA_COMPRESSION = PAGE, PAD_INDEX = OFF, STATISTICS_NORECOMPUTE = OFF, SORT_IN_TEMPDB = OFF, DROP_EXISTING = OFF, ONLINE = OFF, ALLOW_ROW_LOCKS = ON, ALLOW_PAGE_LOCKS = ON)
+END
+
+
+alter database ActiveFX set compatibility_level=120
+alter database ActiveFX set compatibility_level=140
+sp_helpdb          ActiveFX.projections.SPGetProjectionsInternal
+use ActiveFX
+go
+declare @p1 dbo.TTPortfolioCodeList
+insert into @p1 values('006')
+exec projections.SPGetProjectionsInternal @PortfolioCodeList=@p1,@CacheId='43A43C8D-15BA-455F-93B1-9A6FE9C09FE3'
+declare @p1 dbo.TTPortfolioCodeList
+ insert into @p1 values('130') 
+ exec projections.SPGetProjectionsInternal @PortfolioCodeList=@p1,@CacheId='A3E2266B-A8A7-4280-BA11-141F8AA338E7'
+
+SELECT t.text,qs.plan_handle,qs.*,p.*
+    FROM sys.dm_exec_query_stats                    [qs] 
+CROSS APPLY sys.dm_exec_sql_text([qs].sql_handle)      [t]
+CROSS APPLY sys.dm_exec_query_plan([qs].[plan_handle]) [p]
+  WHERE [t].text LIKE '%SPGetProjectionsInternal%'
+    ORDER BY total_elapsed_time DESC
+
+
+
+-- https://docs.microsoft.com/en-us/sql/relational-databases/system-dynamic-management-views/sys-dm-sql-referenced-entities-transact-sql?view=sql-server-ver16 
+SELECT distinct referenced_database_name,referenced_schema_name,referenced_entity_name  --#########################################
+FROM sys.dm_sql_referenced_entities ('dbo.SPGetBottomUpReturns', 'OBJECT')
+ order by referenced_entity_name
+
+execute as login ='ACADIAN\svc_actvbsqluser'     ------
+
+SELECT * INTO dbo.audit_staging_table FROM fn_get_audit_file('E:\SqlAudits\*', default, default);
+select * from fn_get_audit_file('Audit_ph_staging_detail_9E8C81A5-678C-45DA-BF5E-7935BFB3E6BC_0_132989870955450000.sqlaudit',default,default)
+
+select .. from tabname OPTION (MAXDOP 16)
+
+-- performance.dbo.SPGetBottomUpReturns Tuning review
+
+--June 15 increased LOCK on BISAM INT ( Did not help)
+use BISAMDW
+go
+sp_configure 'locks'
+go
+sp_configure 'show advanced options', 1;  
+GO  
+RECONFIGURE;  
+GO  
+sp_configure 'locks', 30000;  
+GO  
+RECONFIGURE;  
+GO  
+
+-- Deadlock Trace enable Errorlog
+DBCC TRACEON(1204,1222,-1)
+DBCC TRACESTATUS(-1)
+DBCC TRACEOff(1204,1222,-1)
+
+-- April 12 2023 Saravana dbrnd02-dev01/03 [Reference].[dbo].[refSecurityCreditICEMarketData] Vault dev entry https://vault.service.dev.acadian-asset.com/ui/vault/secrets/secret/show/avm/acadian-trading/hasura/dbrnd02_password 
+CREATE LOGIN [sql_dev_TradingHasura] WITH PASSWORD=N'tRowEL1cIr10', DEFAULT_DATABASE=[Reference],CHECK_EXPIRATION=OFF, CHECK_POLICY=OFF
+CREATE LOGIN [svc_devperfdataquality] WITH PASSWORD=N'1Zyo1649XNEj', DEFAULT_DATABASE=[AccountPerformance],CHECK_EXPIRATION=OFF, CHECK_POLICY=OFF
+CREATE LOGIN [svc_pag_dq_check] WITH PASSWORD=N'xxxxxxx', DEFAULT_DATABASE=[master],CHECK_EXPIRATION=OFF, CHECK_POLICY=OFF
+,SID=0xDFD1232720AD334F9402105E70D20608  -- login to map ror sid with sid from dbcore01 prod
+
+USE DataWarehouse;   
+GRANT EXECUTE ON OBJECT::[warehouse].[SPbsmPopulateBisamSecurityMaster_Headstoc] TO ActiveBatchRole;  
+GO  
+GRANT EXECUTE ON [warehouse].[SPbsmPopulateBisamSecurityMaster_Headstoc] TO [ACADIAN\FCunningham];  
+
+-- Monitor rollback
+select session_id,command,status,percent_complete,reads,writes
+from sys.dm_exec_requests where command IN ('killed/rollback','rollback')
+
+sp_who3
+sp_who2 active
+sp_help 'BISAMDW.dbo.ATTR_PERF_ATTRIBUTION'
+
+SQL server and other software location  \\acadian-asset.com\Admin\pcadmin\Applications\Microsoft\SQLServer2017
+aws s3 rm s3://great-plains-production-db-backup --recursive
+#Full BKP Sync
+[String]$ComputerName = $env:COMPUTERNAME.ToUpper()
+[String]$r1BucketName = "great-plains-production-db-backup"
+& 'C:\Program Files\Amazon\AWSCLI\bin\aws.exe' s3 sync "E:\BACKUP\$ComputerName" "s3://$r1BucketName/$ComputerName" --sse "aws:kms" --storage-class "STANDARD_IA"  --exclude "*" --include "*.BAK"
+
+https://www.mssqltips.com/sqlservertip/3288/sql-server-replication-error-the-specified-lsn-for-repldone-log-scan-occurs-before-the-current-start-of-replication-in-the-log/ 
+https://www.sqlservercentral.com/forums/topic/cdc-capture-job-issue 
+-- bisamdw cdc latency  https://docs.microsoft.com/en-us/sql/relational-databases/track-changes/administer-and-monitor-change-data-capture-sql-server?view=sql-server-ver15
+-- To troubleshoot check from sys.dm_cdc_log_scan_sessions. If no rows. Drop and recreate CDC cleanup job. check sql agent job step error
+use BISAMDW;
+select session_id,latency, start_time, end_time, duration, scan_phase, error_count, start_lsn, current_lsn, end_lsn, tran_count, last_commit_lsn,
+last_commit_time, log_record_count, schema_change_count,  command_count, first_begin_cdc_lsn, last_commit_cdc_lsn, last_commit_cdc_time, 
+ empty_scan_count, failed_sessions_count   from sys.dm_cdc_log_scan_sessions
+
+-- bisamdw cdc settings
+select db_name(database_id), job_type, retention from msdb.dbo.cdc_jobs
+-- runs at 12 am and set CDC retention to 1 day from 1-6 business days. Else 3 days
+-- BISAMDW.[dbo].[aamSPCDCRetentionInDays   ( Called using activebatch job)
+select db_name(database_id), job_type, retention from msdb.dbo.cdc_jobs  
+--bisamdw regular days set to 4320 minutes(3 days) for prod, sbox1 ( 1st 6 buss days set to 1)
+EXECUTE sys.sp_cdc_change_job @job_type = N'cleanup', @retention = 1440;  -- 1 day
+EXECUTE sys.sp_cdc_change_job @job_type = N'cleanup', @retention = 4320;  -- 3 days
+
+sql agent [cdc.BISAMDW_cleanup]      BISAMDW  sys.sp_MScdc_cleanup_job     BISAMDW.[dbo].[aamSPCDCRetentionInDays]
+
+use bisamdw
+select * from cdc.change_tables where capture_instance like '%ATTR_PERF_ATTRIBUTION%'  -- look down for other cdc sp and queries
+
+
+USE BISAMDW  -- default job type is capture, so specifying no parameter works on CAPTURE job
+EXEC sys.sp_cdc_stop_job @job_type = N'cleanup';
+EXEC sys.sp_cdc_start_job @job_type = N'cleanup';
+
+
+-- run below after every db refresh in non prod					   
+USE BISAMDW 
+GO
+EXEC sys.sp_cdc_add_job @job_type = N'capture'; 
+EXEC sys.sp_cdc_add_job @job_type = N'cleanup'; 
+GO
+use Acadian  
+select * from cdc.change_tables where capture_instance like '%bsmQ%'    -- bisam_bsmQuintiles and bisam_bsmQuintileRegionLookup table cdc already enabled as 3/22
+use Acadian  
+GO
+EXEC sys.sp_cdc_add_job @job_type = N'capture'; 
+EXEC sys.sp_cdc_add_job @job_type = N'cleanup'; 
+GO
+use  accounting
+GO
+EXEC sys.sp_cdc_add_job @job_type = N'capture'; 
+EXEC sys.sp_cdc_add_job @job_type = N'cleanup'; 
+GO
+
+-- CDC https://www.sqlshack.com/change-data-capture-for-auditing-sql-server/  https://www.youtube.com/watch?v=IJbAhfFRHdA   Enabling CDC In order to enable the Change Data capture on a specific table, for auditing purposes, CDC should be enabled first at the database level first, by a member of the SYSADMIN fixed server role, using the sys.sp_cdc_enable_db. After enabling CDC at the database level, we can enable it to track and audit the DML changes on the database tables, by a member of db_owner fixed database role, using the sys.sp_cdc_enable_table system stored procedure, with the ability to enable it to track changes on list of columns specified by the @captured_column_list 
+
+#####################################################################################################################################
+Steps to enable CDC on BISAMDW and replicate changes to BOS-DBWH02 PROD. Follow 
+
+PSD-909  2 step process  1) Enable CDC and grants in BISAMDW and replicate changes to Datawarehouse for T_COUNTRY table (use git post script for changes) https://git.acadian-asset.com/performance/bisam/warehouse-loader/database-mssql/-/blob/master/DBBONE01/BISAMDW/Scripts/PostDeployment/008-PMA-961%20Add%20T_Country%20to%20cdc.sql
+	1) Senthil did steps on BOS-DBWH02 side PSD-909 
+Reference doc https://acadian-asset.atlassian.net/wiki/spaces/PD/pages/47349767/Add+New+Tables+Columns+To+DataWarehouse
+USE BISAMDW
+GO
+EXEC sys.sp_cdc_enable_table
+@source_schema = N'dbo',
+@source_name = N'T_COUNTRY',
+@role_name = N'CDCRole',
+@capture_instance = N'dbo_T_COUNTRY',
+@supports_net_changes = 0,
+@captured_column_list = NULL,
+@filegroup_name = N'BISAMDW_CDC_DATA'
+GO
+GRANT SELECT ON cdc.dbo_T_COUNTRY_CT TO CDCRole;
+GRANT SELECT ON dbo.T_COUNTRY TO CDCRole;
+#####################################################################################################################################
+
+Christian doc - Enable CDC on dbcore, Adding tables to changedata on dbwho-02 instance without having it flow to DataWarehouse
+https://acadian-asset.atlassian.net/wiki/spaces/PAB/pages/2602795015/Enabling+CDC+for+Snowflake+Consumption 
+					
+use performance;
+select name,is_cdc_enabled from sys.databases where is_cdc_enabled=1 -- cdc enabled at DB
+select name,schema_name(schema_id) schema_nm,type from sys.tables where is_tracked_by_cdc=1  order by schema_nm
+--enables change data capture for the HumanResources.Employee table. Only the required parameters are specified.
+use acadian;
+EXEC sys.sp_cdc_enable_table  
+    @source_schema = N'dbo'  
+  , @source_name = N'FrankingCreditCcy'  
+  , @role_name = N'CDCRole'  
+  , @filegroup_name = N'PRIMARY';  
+GO  
+
+use bisamdw
+select * from cdc.change_tables where capture_instance like '%ATTR_PERF_ATTRIBUTION%'
+use BISAMDW;
+EXEC sys.sp_cdc_disable_table  
+    @source_schema = N'dbo'  
+  , @source_name = N'ATTR_PERF_ATTRIBUTION'  
+  , @capture_instance = N'dbo_ATTR_PERF_ATTRIBUTION'
+
+GO  
+EXEC sys.sp_cdc_enable_table  
+    @source_schema = N'dbo'  
+  , @source_name = N'ATTR_PERF_ATTRIBUTION'  
+  , @role_name = N'CDCRole'  
+  , @filegroup_name = N'BISAMDW_CDC_DATA',
+  @supports_net_changes = 0;    -- supports_net_changes=1 is set in BISAM prod, set to 0 to reduce CDC latency in BISAM Sandbox1 
+GO  
+
+
+grant select on  [cdc].[dbo_FrankingCreditCcy_CT] to CDCRole;
+grant select on Acadian.cdc.dbo_FrankingCreditCcy_CT to [Acadian\fcunningham];
+grant select on  dbo.FrankingCreditCcy to CDCRole;
+
+alter role CommunityAccess drop member usernm;
+
+
+
+[5:31 PM] Stephen Sullivan -- #########################################################################################
+CREATE TABLE #FileSize
+(dbName NVARCHAR(128),    FileName NVARCHAR(128),     type_desc NVARCHAR(128),    FileLocation NVARCHAR(256),    MappedDrive NVARCHAR(128),    CurrentSizeMB DECIMAL(10,2),     FreeSpaceMB DECIMAL(10,2)
+);    
+INSERT INTO #FileSize(dbName, FileName, type_desc, FileLocation, MappedDrive, CurrentSizeMB, FreeSpaceMB)
+exec master.dbo.sp_MSforeachdb
+'use [?];
+SELECT DB_NAME() AS DbName,        df.name AS FileName,                 type_desc,        sa.filename,        CASE WHEN sa.filename like ''C:\SQL\data%'' THEN LEFT(sa.filename,13) ELSE LEFT(sa.filename,3) END as MappedDrive,        df.size/128.0 AS CurrentSizeMB,          df.size/128.0 - CAST(FILEPROPERTY(df.name, ''SpaceUsed'') AS INT)/128.0 AS FreeSpaceMB
+FROM sys.database_files df
+LEFT JOIN master..sysaltfiles sa ON df.name collate SQL_Latin1_General_CP1_CS_AS = sa.name
+WHERE type IN (0,1);';    
+SELECT dbName, FileName, type_desc, FileLocation, MappedDrive, CurrentSizeMB, FreeSpaceMB, Cast((FreeSpaceMB / CurrentSizeMB) * 100 as Decimal(18,2)) as PctFree
+FROM #FileSize
+--WHERE dbName IN ('qai') and MappedDrive = 'F:\'
+--AND FreeSpaceMB > ?;
+Order by MappedDrive, dbName    
+DROP TABLE #FileSize;
+-- use this to get the used / free space by drive and data file
+-- #########################################################################################
+
+
+-- Refer to Microsoft Notes "login map"
+--update mapping table  after creating svc_dev* svc_qa* user ( Below will allow user creation after prod snap)
+use master;
+SELECT  a.[MappingId],a.[LoginName], b.LoginName,a.[LoginTypeId],a.[ParentMappingId]
+  FROM [master].[dbo].[ServiceAccountMapping] a join [master].[dbo].[ServiceAccountMapping] b  on a.MappingId=b.ParentMappingId
+--master.dbo.sp_AAM_CreateNewAccountForAllDb @ProdLogin,@DevLogin
+--master.dbo.sp_AAM_CreateAccountForSingleDb
+-- Refresh post script DBCore,  If roles are present with same name in prod,qa,dev they are mapped and granted using [master].[dbo].[ServiceAccountMapping] Table
+-- https://git.acadian-asset.com/DO/RefreshAutomation/-/blob/master/CORE/11-CloneProductionPermissions.sql executes sp_AAM_CreateAccountForSingleDb(create user for login) sp_AAM_CreateNewAccountForAllDb
+-- Refresh post script DBWH02
+-- https://git.acadian-asset.com/DO/RefreshAutomation/-/blob/master/WH02/98_Access_for_FCunningham.sql
+
+-- dev dbcore-dev01  -- use 2 for dev 
+USE [master]
+GO
+INSERT INTO [dbo].[ServiceAccountMapping]  ([MappingId],[LoginName],[LoginTypeId],[ParentMappingId])
+     VALUES(269,'svc_Adhoc',1,NULL)
+INSERT INTO [dbo].[ServiceAccountMapping]  ([MappingId],[LoginName],[LoginTypeId],[ParentMappingId])
+     VALUES(270,'svc_devAdhoc',2,269)
+
+select *  from [master].[dbo].[ServiceAccountMapping] where MappingId in (269,270)
+
+-- qa  dbcore-qa01  -- use 3 for qa
+USE [master]
+GO
+INSERT INTO [dbo].[ServiceAccountMapping]  ([MappingId],[LoginName],[LoginTypeId],[ParentMappingId])
+     VALUES(323,'svc_Adhoc',1,NULL)
+INSERT INTO [dbo].[ServiceAccountMapping]  ([MappingId],[LoginName],[LoginTypeId],[ParentMappingId])
+     VALUES(324,'svc_qaAdhoc',3,323)
+
+	 
+
+use [DataMart]
+DECLARE @Environment VARCHAR(5)
+EXEC DataMart.dbo.sp_get_environment @Environment=@Environment OUTPUT
+
+cmd> wmic useraccount where name='rkumar' get sid         (output  SID  S-1-5-21-1974477226-268597913-1415713722-73962 )
+
+DBCC SHOW_STATISTICS ("BISAMDW.dbo.ATTR_PERF_ATTRIBUTION",[PERF_ATTRIB_CALCUL_DATE_IDX]); 
+DBCC SHOW_STATISTICS ("BISAMDW.dbo.ATTR_PERF_ATTRIBUTION",[PERF_ATTRIB_END_DATE_IDX]); 
+
+DBCC SHOW_STATISTICS ("[warehouse].[bisamAttributions_Headstoc]",[PK_warehouse_bisamAttributions_Headstoc]);  
+
+--bos-dbwh02 ( Auto Update Statistics and Asynchronously(True) , Auto Create Incremental Statistics = False )
+-- Database Tables and rowcounts  -- https://www.mssqltips.com/sqlservertip/2537/sql-server-row-count-for-all-tables-in-a-database/ 
+SELECT   QUOTENAME(SCHEMA_NAME(sOBJ.schema_id)) + '.' + QUOTENAME(sOBJ.name) AS [TableName]    , SUM(sPTN.Rows) AS [RowCount]
+FROM sys.objects AS sOBJ     INNER JOIN sys.partitions AS sPTN         ON sOBJ.object_id = sPTN.object_id
+WHERE      sOBJ.type = 'U'      AND sOBJ.is_ms_shipped = 0x0      AND index_id < 2 -- 0:Heap, 1:Clustered  
+AND sOBJ.name like 'bisam%'
+GROUP BY   sOBJ.schema_id , sOBJ.name ORDER BY 2 desc
+
+---- statistics modification_counter, runs in 30 seconds
+use db_name;
+SELECT schema_name(obj.schema_id),obj.name, obj.object_id, stat.name, stat.stats_id,last_updated, modification_counter
+FROM sys.objects AS obj INNER JOIN sys.stats AS stat ON stat.object_id = obj.object_id
+CROSS APPLY sys.dm_db_stats_properties(stat.object_id, stat.stats_id) AS sp ORDER BY modification_counter DESC
+
+SELECT DB_Name() DatabaseName, OBJECT_SCHEMA_NAME(obj.object_id) schemaName, obj.name TableName,    stat.name, modification_counter, 
+            [rows], rows_sampled, rows_sampled* 100 / [rows] AS [% Rows Sampled],     last_updated
+FROM        sys.objects AS obj INNER JOIN  sys.stats AS stat ON stat.object_id = obj.object_id
+CROSS APPLY sys.dm_db_stats_properties(stat.object_id, stat.stats_id) AS sp
+WHERE       obj.is_ms_shipped = 0 and last_updated is not null and modification_counter > 20000
+AND [rows] >= 20000 AND rows_sampled * 100 / [rows] >  10  ORDER BY    last_updated , modification_counter DESC
+
+-- Query to check if the statistics for a object is stale
+use Optimizer
+go
+-- Query to check if the statistics for a object is stale
+SELECT obj.name, obj.object_id, stat.name, stat.stats_id,last_updated, modification_counter
+FROM sys.objects AS obj INNER JOIN sys.stats AS stat ON stat.object_id = obj.object_id CROSS APPLY sys.dm_db_stats_properties(stat.object_id, stat.stats_id) AS sp
+where stat.object_id=object_id('Optimizer.dbo.EvaluationResults') ORDER BY modification_counter DESC
+
+use bisamdw;
+SELECT obj.name, obj.object_id, stat.name, stat.stats_id,last_updated, modification_counter
+FROM sys.objects AS obj INNER JOIN sys.stats AS stat ON stat.object_id = obj.object_id CROSS APPLY sys.dm_db_stats_properties(stat.object_id, stat.stats_id) AS sp
+where stat.object_id=object_id('BISAMDW.dbo.ATTR_PERF_ATTRIBUTION') ORDER BY modification_counter DESC
+
+-- Update only statitics of a index
+update statistics DataWarehouse.warehouse.bisamAttributions_Headstoc                 DataWarehouse.warehouse.bisamAttributions_GICS_SubInd
+update statistics [warehouse].[bisamAttributions_Headstoc] [PK_warehouse_bisamAttributions_Headstoc] 
+update statistics DataWarehouse.warehouse.bisamAttributions_GICS_SubInd  -- apr 1 2022
+
+-- CHECK modification_counter
+select * from sys.dm_db_stats_properties(object_id('DataWarehouse.warehouse.bisamAttributions_Headstoc'),2)
+select * from sys.dm_db_stats_properties(object_id('BISAMDW.[dbo].[INDEX_WEIGHTINGS]'),2)
+sp_spaceused "[warehouse].[bisamAttributions_Headstoc]"
+sp_spaceused "[warehouse].[bisamAttributions_GICS_Sec]"
+update statistics [warehouse].[bisamAttributions_Headstoc]
+update statistics [warehouse].[bisamAttributions_GICS_Sec]
+DBCC SHOW_STATISTICS ("[warehouse].[bisamAttributions_Headstoc]",[PK_warehouse_bisamAttributions_Headstoc]);  
+
+
+set statistics io on;
+set statistics xml on;
+EXEC AccountPerformance.acctperf.SPrptGetAllAccountMonthlyReturns null, '10/31/2021'
+
+update statistics [acctperf].[AccountMonthlyReturnsBiSam];
+update statistics [acctperf].[AccountMonthlyReturnsLegacy];
+
+-- procedure execution stats and plan_handle
+SELECT  OBJECT_NAME(object_id, database_id) 'proc name',  d.cached_time, d.last_execution_time, d.total_elapsed_time, d.total_elapsed_time/d.execution_count AS [avg_elapsed_time], d.last_elapsed_time, d.execution_count,d.* 
+FROM sys.dm_exec_procedure_stats AS d 
+where OBJECT_NAME(object_id, database_id)='SPrptGetReturnTypeAvailabilityFrequencies'
+ORDER BY [total_worker_time] DESC;
+
+SELECT t.text,qs.plan_handle,qs.*,p.*
+    FROM sys.dm_exec_query_stats                    [qs] 
+CROSS APPLY sys.dm_exec_sql_text([qs].sql_handle)      [t]
+CROSS APPLY sys.dm_exec_query_plan([qs].[plan_handle]) [p]
+  WHERE [t].text LIKE '%SPcrdSingleMergeTradeExportAutoFX%'
+    ORDER BY total_elapsed_time DESC
+	
+-- one month EQA Mar 2023 slowness   DBCC FREEPROCCACHE(0x02000000FB9DE429390EC06111AEA65DA03CFEC281DAE09F0000000000000000000000000000000000000000)
+SELECT t.text,qs.plan_handle,qs.*,p.*
+   FROM sys.dm_exec_query_stats                    [qs] 
+CROSS APPLY sys.dm_exec_sql_text([qs].sql_handle)      [t]
+CROSS APPLY sys.dm_exec_query_plan([qs].[plan_handle]) [p]
+ WHERE  [t].text LIKE '%(@P0 int,@P1 int,@P2 int,@P3 datetime,@P4 datetime)SELECT ATTR_PERF_ATTRIBUTION.ATGAI_ID,ATTR_PERF_ATTRIBUTION.ATPTF_ID%'  and
+  CAST(p.query_plan AS NVARCHAR(MAX)) LIKE '%IDX_AAM_ATTR_PERF_ATTRIBUTION_ATPTF_ID%'
+and CAST(p.query_plan AS NVARCHAR(MAX))  NOT LIKE '%PERF_ATTRIB_END_DATE_IDX%'
+    ORDER BY total_elapsed_time DESC
+	
+-- EQA YTD Top sql causing 40% cpu usage
+SELECT t.text,qs.plan_handle,qs.*,p.*
+    FROM sys.dm_exec_query_stats                    [qs] 
+CROSS APPLY sys.dm_exec_sql_text([qs].sql_handle)      [t]
+CROSS APPLY sys.dm_exec_query_plan([qs].[plan_handle]) [p]
+  WHERE [t].text LIKE '(@P0 int,@P1 datetime,@P2 datetime,@P3 int,@P4 int,@P5 int,@P6 int)SELECT COUNT(1) FROM ATTR_PERF_ATTRIBUTION%'
+    ORDER BY total_elapsed_time DESC
+	
+-- Search query plan using specific index
+SELECT t.text,qs.plan_handle,qs.*,p.*
+    FROM sys.dm_exec_query_stats                    [qs] 
+CROSS APPLY sys.dm_exec_sql_text([qs].sql_handle)      [t]
+CROSS APPLY sys.dm_exec_query_plan([qs].[plan_handle]) [p]
+ WHERE  [t].text LIKE '(@P0 int,@P1 datetime,@P2 datetime,@P3 int,@P4 int,@P5 int,@P6 int)SELECT COUNT(1) FROM ATTR_PERF_ATTRIBUTION%'  and
+  CAST(p.query_plan AS NVARCHAR(MAX)) LIKE '%PERF_ATTRIB_END_DATE_IDX%'
+ -- CAST(p.query_plan AS NVARCHAR(MAX)) LIKE '%PERF_ATTRIB_CALCUL_DATE_IDX%'
+    ORDER BY total_elapsed_time DESC
+	
+SELECT t.text,qs.plan_handle,qs.*,p.*
+    FROM sys.dm_exec_query_stats                    [qs]
+CROSS APPLY sys.dm_exec_sql_text([qs].sql_handle)      [t]
+CROSS APPLY sys.dm_exec_query_plan([qs].[plan_handle]) [p]
+    WHERE [t].text LIKE '%SPrptGetAllAccountMonthlyReturns%'
+    ORDER BY total_elapsed_time DESC
+-- June 1 2023 Add more conditions to below query to find bad plan then flush	
+SELECT t.text,qs.plan_handle,qs.*,p.*
+    FROM sys.dm_exec_query_stats                    [qs] 
+CROSS APPLY sys.dm_exec_sql_text([qs].sql_handle)      [t]
+CROSS APPLY sys.dm_exec_query_plan([qs].[plan_handle]) [p]
+ WHERE  [t].text LIKE '%)SELECT ATTR_PERF_ATTRIBUTION.ATGAI_ID,ATTR_PERF_ATTRIBUTION.ATPTF_ID,ATTR_PERF_ATTRIBUTION.BENCH_ID,ATTR_PERF_ATTRIBUTION.ATINS_ID%'
+    ORDER BY total_elapsed_time DESC
+
+SELECT t.text,qs.plan_handle,qs.*,p.*
+    FROM sys.dm_exec_query_stats                    [qs] 
+CROSS APPLY sys.dm_exec_sql_text([qs].sql_handle)      [t]
+CROSS APPLY sys.dm_exec_query_plan([qs].[plan_handle]) [p]
+ WHERE  [t].text LIKE '%)SELECT MAX(INDEX_WEIGHTINGS.IDXW_DATE) FROM INDEX_WEIGHTINGS%'
+    ORDER BY total_elapsed_time DESC	
+
+-- proc plan	
+SELECT TOP 20 d.object_id, d.database_id, OBJECT_NAME(object_id, database_id) 'proc name',  d.cached_time, d.last_execution_time, d.total_elapsed_time, d.total_elapsed_time/d.execution_count AS [avg_elapsed_time], d.last_elapsed_time, d.execution_count,d.* 
+FROM sys.dm_exec_procedure_stats AS d -- where d.database_id=5 
+ORDER BY [total_worker_time] DESC; 
+
+
+
+exec [BISAMDW].[dbo].[aamSPIndexWeightPlanFlush]	
+DBCC DROPCLEANBUFFERS -- run in dev/test only for perf testing
+DBCC FREEPROCCACHE(plan_handle)
+DBCC FREEPROCCACHE(0x02000000FB9DE429390EC06111AEA65DA03CFEC281DAE09F0000000000000000000000000000000000000000)
+
+use BISAMDW
+go
+update statistics index_weightings
+
+alter index idxname on db_name.dbo.table_name rebuild with(online=on, allow_page_locks=on ,maxdop=0)
 
 
 -- When were Statistics last updated on all indexes?  (Query 71) (Statistics Update)
+-- very slow
 SELECT SCHEMA_NAME(o.Schema_ID) + N'.' + o.[NAME] AS [Object Name], o.[type_desc] AS [Object Type],
       i.[name] AS [Index Name], STATS_DATE(i.[object_id], i.index_id) AS [Statistics Date], 
       s.auto_created, s.no_recompute, s.user_created, s.is_incremental, s.is_temporary,
@@ -1040,13 +663,8 @@ ORDER BY STATS_DATE(i.[object_id], i.index_id) DESC OPTION (RECOMPILE);
 -- Helps discover possible problems with out-of-date statistics
 -- Also gives you an idea which indexes are the most active
 
--- sys.stats (Transact-SQL)
--- https://bit.ly/2GyAxrn
-
--- UPDATEs to Statistics (Erin Stellato)
--- https://bit.ly/2vhrYQy
-
-
+DBCC SHOW_STATISTICS ("[acctperf].[AccountMonthlyReturnsBiSam]",[PK_acctperf_AccountMonthlyReturnsBiSam]);  
+GO  
 
 
 -- Look at most frequently modified indexes and statistics (Query 72) (Volatile Indexes)
@@ -1065,7 +683,31 @@ ORDER BY sp.modification_counter DESC, o.name OPTION (RECOMPILE);
 -- This helps you understand your workload and make better decisions about 
 -- things like data compression and adding new indexes to a table
 
+-- heap tables
+SELECT SCH.name + '.' + TBL.name AS TableName
+FROM sys.tables AS TBL
+INNER JOIN sys.schemas AS SCH ON TBL.schema_id = SCH.schema_id
+INNER JOIN sys.indexes AS IDX ON TBL.object_id = IDX.object_id AND IDX.type = 0
+ORDER BY TableName
+-- alter index idxname on db_name.dbo.table_name rebuild          alter index all on db_name.dbo.table_name rebuild [online]
+--alter index idxname on db_name.dbo.table_name reorganize        alter index all on db_name.dbo.table_name reorganize [online]
 
+-- Index Fragmentation check for single table
+use db_name; use IndexData
+ SELECT DB_NAME(ps.database_id) AS [Database Name], SCHEMA_NAME(o.[schema_id]) AS [Schema Name],
+OBJECT_NAME(ps.OBJECT_ID) AS [Object Name], i.[name] AS [Index Name], ps.index_id, 
+ps.index_type_desc, ps.avg_fragmentation_in_percent, 
+ps.fragment_count, ps.page_count, i.fill_factor, i.has_filter, 
+i.filter_definition, i.[allow_page_locks]
+FROM sys.dm_db_index_physical_stats(DB_ID(),object_id('IndexData.dbo.idxConstituentReturns'), NULL, NULL , N'LIMITED') AS ps
+INNER JOIN sys.indexes AS i WITH (NOLOCK)
+ON ps.[object_id] = i.[object_id] 
+AND ps.index_id = i.index_id
+INNER JOIN sys.objects AS o WITH (NOLOCK)
+ON i.[object_id] = o.[object_id] 
+WHERE ps.database_id = DB_ID()
+AND ps.page_count > 2500
+ORDER BY ps.avg_fragmentation_in_percent DESC OPTION (RECOMPILE);
 
 -- Get fragmentation info for all indexes above a certain size in the current database  (Query 73) (Index Fragmentation)
 -- Note: This query could take some time on a very large database
@@ -1084,6 +726,14 @@ WHERE ps.database_id = DB_ID()
 AND ps.page_count > 2500
 ORDER BY ps.avg_fragmentation_in_percent DESC OPTION (RECOMPILE);
 ------
+
+select db_name(database_id)as DBName,object_name(ind.object_id)TableName,ind.name as IndexName,ind.index_id,partition_number,
+page_count,avg_fragmentation_in_percent,0 as Status,getdate()as CreatedDate 
+from  sys.dm_db_index_physical_stats (DB_ID(), NULL, NULL , NULL, 'LIMITED') t1
+join sys.indexes ind
+on ind.index_id = t1.index_id 
+and ind.object_id = t1.object_id
+WHERE avg_fragmentation_in_percent > 10.0 AND ind.index_id =1 and page_count >1000
 
 -- Helps determine whether you have framentation in your relational indexes
 -- and how effective your index maintenance strategy is
@@ -1110,181 +760,716 @@ ORDER BY s.user_seeks + s.user_scans + s.user_lookups DESC OPTION (RECOMPILE); -
 
 -- Show which indexes in the current database are most active for Reads
 
-
---- Index Read/Write stats (all tables in current DB) ordered by Writes  (Query 75) (Overall Index Usage - Writes)
-SELECT SCHEMA_NAME(t.[schema_id]) AS [SchemaName],OBJECT_NAME(i.[object_id]) AS [ObjectName], 
-	   i.[name] AS [IndexName], i.index_id,
-	   s.user_updates AS [Writes], s.user_seeks + s.user_scans + s.user_lookups AS [Total Reads], 
-	   i.[type_desc] AS [Index Type], i.fill_factor AS [Fill Factor], i.has_filter, i.filter_definition,
-	   s.last_system_update, s.last_user_update
-FROM sys.indexes AS i WITH (NOLOCK)
-LEFT OUTER JOIN sys.dm_db_index_usage_stats AS s WITH (NOLOCK)
-ON i.[object_id] = s.[object_id]
-AND i.index_id = s.index_id
-AND s.database_id = DB_ID()
-LEFT OUTER JOIN sys.tables AS t WITH (NOLOCK)
-ON t.[object_id] = i.[object_id]
-WHERE OBJECTPROPERTY(i.[object_id],'IsUserTable') = 1
-ORDER BY s.user_updates DESC OPTION (RECOMPILE);						 -- Order by writes
-------
-
--- Show which indexes in the current database are most active for Writes
+sp_helpdb
+go
+SELECT SERVERPROPERTY('MachineName') AS ComputerName,SERVERPROPERTY('ServerName') AS InstanceName,SERVERPROPERTY('Edition') AS Edition,SERVERPROPERTY('ProductVersion') AS ProductVersion, SERVERPROPERTY('ProductLevel') AS ProductLevel;  
+GO  
+sp_whoisactive
+go
+select @@version,@@SERVERNAME
 
 
-
--- Get lock waits for current database (Query 76) (Lock Waits)
-SELECT o.name AS [table_name], i.name AS [index_name], ios.index_id, ios.partition_number,
-             SUM(ios.row_lock_wait_count) AS [total_row_lock_waits], 
-             SUM(ios.row_lock_wait_in_ms) AS [total_row_lock_wait_in_ms],
-			 SUM(ios.index_lock_promotion_attempt_count) AS [total index_lock_promotion_attempt_count],
-             SUM(ios.index_lock_promotion_count) AS [ios.index_lock_promotion_count],
-             SUM(ios.page_lock_wait_count) AS [total_page_lock_waits],
-             SUM(ios.page_lock_wait_in_ms) AS [total_page_lock_wait_in_ms],
-             SUM(ios.page_lock_wait_in_ms)+ SUM(row_lock_wait_in_ms) AS [total_lock_wait_in_ms]           
-FROM sys.dm_db_index_operational_stats(DB_ID(), NULL, NULL, NULL) AS ios
-INNER JOIN sys.objects AS o WITH (NOLOCK)
-ON ios.[object_id] = o.[object_id]
-INNER JOIN sys.indexes AS i WITH (NOLOCK)
-ON ios.[object_id] = i.[object_id] 
-AND ios.index_id = i.index_id
-WHERE o.[object_id] > 100
-GROUP BY o.name, i.name, ios.index_id, ios.partition_number
-HAVING SUM(ios.page_lock_wait_in_ms)+ SUM(row_lock_wait_in_ms) > 0
-ORDER BY total_lock_wait_in_ms DESC OPTION (RECOMPILE);
-------
-
--- This query is helpful for troubleshooting blocking and deadlocking issues
+-- BOS-DBWH02 sql agent job - Update Problem Statistics
+--UPDATE STATISTICS DataWarehouse.warehouse.bisamAttributions_Regn_Ind  -- 3 minutes runtime
 
 
+SELECT  QUOTENAME(SCHEMA_NAME(sOBJ.schema_id)) + '.' + QUOTENAME(sOBJ.name) AS [TableName] , SUM(sPTN.Rows) AS [RowCount]
+FROM   sys.objects AS sOBJ   INNER JOIN sys.partitions AS sPTN       ON sOBJ.object_id = sPTN.object_id
+WHERE  sOBJ.type = 'U'    AND sOBJ.is_ms_shipped = 0x0    AND index_id < 2 -- 0:Heap, 1:Clustered
+GROUP BY sOBJ.schema_id, sOBJ.name ORDER BY 2 desc
 
--- Look at UDF execution statistics (Query 77) (UDF Statistics)
-SELECT OBJECT_NAME(object_id) AS [Function Name], execution_count,
-	   total_worker_time, total_logical_reads, total_physical_reads, total_elapsed_time, 
-	   total_elapsed_time/execution_count AS [avg_elapsed_time],
-	   FORMAT(cached_time, 'yyyy-MM-dd HH:mm:ss', 'en-US') AS [Plan Cached Time]
-FROM sys.dm_exec_function_stats WITH (NOLOCK) 
-WHERE database_id = DB_ID()
-ORDER BY total_worker_time DESC OPTION (RECOMPILE); 
-------
+exec sp_help '[warehouse].[fund]';
 
--- New for SQL Server 2016
--- Helps you investigate scalar UDF performance issues
--- Does not return information for table valued functions
+/* update statistics 1.45 AM daily both takes 15 minutes
+Delivery Team Folders-> team12-> BISAM -> BiSam ATTR_PERF_ATTRIBUTION statistics and Frank's aamSP_PtfKeyDates_to_bsmStateData
+-- update statistics BISAMDW.dbo.ATTR_PERF_ATTRIBUTION;    -- 15 minutes
+-- update statistics schema.table index_name;
+-- update statistics [dbo].[INDEX_WEIGHTINGS]  -- update statistics for all indexes for a table
+--update statistics [dbo].[INDEX_WEIGHTINGS] [IDX_INDEX_WEIGHTINGS]  -- update statics for specified index for a table
+--update statistics [dbo].[INDEX_WEIGHTINGS] [IDX_INDEX_WEIGHTINGS] WITH SAMPLE 10 PERCENT;   -- runs longer
 
--- sys.dm_exec_function_stats (Transact-SQL)
--- https://bit.ly/2q1Q6BM
+EXEC sp_updatestats;  --update statistics for all user-defined and internal tables in the database
+*/
 
+-- role extract
+SET NOCOUNT ON
+Use DataWarehouse;  -- ADJUST DB NAME
+DECLARE @RoleName varchar(50) = 'ActiveBatchRole' --- PLACE ROLE NAME
+SELECT 'CREATE ROLE ' + @RoleName + ';'+ char(13)
+SELECT  'GRANT ' + prm.permission_name + ' ON ' + OBJECT_NAME(major_id) + ' TO ' + rol.name + ' ;' + char(13) COLLATE Latin1_General_CI_AS
+from sys.database_permissions prm join sys.database_principals rol on prm.grantee_principal_id = rol.principal_id
+where rol.name = @RoleName
 
--- Get QueryStore Options for this database (Query 78) (QueryStore Options)
-SELECT actual_state_desc, desired_state_desc, [interval_length_minutes],
-       current_storage_size_mb, [max_storage_size_mb], 
-	   query_capture_mode_desc, size_based_cleanup_mode_desc
-FROM sys.database_query_store_options WITH (NOLOCK) OPTION (RECOMPILE);
-------
-
--- New for SQL Server 2016
--- Requires that Query Store is enabled for this database
-
--- Make sure that the actual_state_desc is the same as desired_state_desc
--- Make sure that the current_storage_size_mb is less than the max_storage_size_mb
-
--- Tuning Workload Performance with Query Store
--- https://bit.ly/1kHSl7w
-
--- Emergency shutoff for Query Store (SQL Server 2017 CU21 or newer)
--- ALTER DATABASE [DatabaseName] SET QUERY_STORE = OFF(FORCED);
+-- For BISAM INT refresh failure
+-- step 1) get list of all logs that are not applied till bisam night cycle
+-- step 2) prepare script with all logs except last with NORECOVERY ( Do not mention keep_cdc)
+-- step 2a) run the backup script to find full diff and log file names to create script
+-- step 3) run last restore log with RECOVERY and KEEP_CDC
+-- step 4) run With Recovery Restore logs - Set Permissions ( This sends refresh completion email) ( or Extract script from Activebatch and run)
+-- step 5) -- Enable CDC if SQL agent job is missing on BISAMDW int or sandbox
 
 
--- Get input buffer information for the current database (Query 79) (Input Buffer)
-SELECT es.session_id, DB_NAME(es.database_id) AS [Database Name],
-       es.login_time, es.cpu_time, es.logical_reads, es.memory_usage,
-       es.[status], ib.event_info AS [Input Buffer]
-FROM sys.dm_exec_sessions AS es WITH (NOLOCK)
-CROSS APPLY sys.dm_exec_input_buffer(es.session_id, NULL) AS ib
-WHERE es.database_id = DB_ID()
-AND es.session_id > 50
-AND es.session_id <> @@SPID OPTION (RECOMPILE);
-------
+					
+-- To view the objects that depend on a table
+SELECT * FROM sys.sql_expression_dependencies  WHERE referencing_id = OBJECT_ID(N'[dbo].[IndexDefragHistory2005]');   
+--To view the dependencies of a table
+SELECT * FROM sys.sql_expression_dependencies  WHERE referenced_id = OBJECT_ID(N'[dbo].[IndexDefragHistory2005]');   
 
--- Gives you input buffer information from all non-system sessions for the current database
--- Replaces DBCC INPUTBUFFER
+EXEC sp_rename 'schema.Tablename', 'NewTableName'; 					
 
--- New DMF for retrieving input buffer in SQL Server
--- https://bit.ly/2uHKMbz
+-- Restore mulitple logs WITH NORECOVERY
+RESTORE LOG [BISAMDW] FROM  DISK = N'\\use1-prod-db01.acadian.am\BACKUP\EC2AMAZ-OSST82Q\BISAMDW\LOG\EC2AMAZ-OSST82Q_BISAMDW_LOG_20211202_070000.TRN'   
+ WITH NORECOVERY,FILE = 1,NOUNLOAD,  STATS = 10; -- norecovery
+ -- RESTORE LAST LOG WITH RECOVERY
+RESTORE LOG [BISAMDW] FROM  DISK = N'\\use1-prod-db01.acadian.am\BACKUP\EC2AMAZ-OSST82Q\BISAMDW\LOG\EC2AMAZ-OSST82Q_BISAMDW_LOG_20230516_074500.TRN'  20230504_093000
+ WITH  RECOVERY, FILE = 1,NOUNLOAD,  STATS = 10 , KEEP_CDC  -- last recovery and keep_cdc
+ 
+ 
+--Database Backups last 24 hours
+--------------------------------------------------------------------------------- 
+SELECT  msdb.dbo.backupset.database_name,   msdb.dbo.backupset.backup_start_date,  msdb.dbo.backupset.backup_finish_date, CASE msdb..backupset.type 
+WHEN 'D' THEN 'Database'     WHEN 'L' THEN 'Log'    END AS backup_type,  msdb.dbo.backupset.backup_size,  msdb.dbo.backupmediafamily.physical_device_name,
+msdb.dbo.backupset.first_lsn,msdb.dbo.backupset.last_lsn
+FROM msdb.dbo.backupmediafamily (nolock) INNER JOIN msdb.dbo.backupset (nolock) ON msdb.dbo.backupmediafamily.media_set_id = msdb.dbo.backupset.media_set_id 
+WHERE (CONVERT(datetime, msdb.dbo.backupset.backup_start_date, 102) >= GETDATE() - 1) -- and msdb.dbo.backupset.database_name='BISAMDW'
+ORDER BY    msdb.dbo.backupset.backup_finish_date desc
 
--- sys.dm_exec_input_buffer (Transact-SQL)
--- https://bit.ly/2J5Hf9q
-
-
-
--- Get any resumable index rebuild operation information (Query 80) (Resumable Index Rebuild)
-SELECT OBJECT_NAME(iro.object_id) AS [Object Name], iro.index_id, iro.name AS [Index Name],
-       iro.sql_text, iro.last_max_dop_used, iro.partition_number, iro.state_desc, 
-	   iro.start_time, iro.percent_complete
-FROM  sys.index_resumable_operations AS iro WITH (NOLOCK)
-OPTION (RECOMPILE);
------- 
-
--- index_resumable_operations (Transact-SQL)
--- https://bit.ly/2pYSWqq
-
-
--- Get database automatic tuning options (Query 81) (Automatic Tuning Options)
-SELECT [name], desired_state_desc, actual_state_desc, reason_desc
-FROM sys.database_automatic_tuning_options WITH (NOLOCK)
-OPTION (RECOMPILE);
------- 
-
--- sys.database_automatic_tuning_options (Transact-SQL)
--- https://bit.ly/2FHhLkL
+-- sql server error log location
+SELECT SERVERPROPERTY('ErrorLogFileName') AS 'Error log file location';
+EXEC xp_ReadErrorLog 0,1,N'BISAMDW',N'', N'2022-01-02 00:00:00.000', N'2022-01-10 00:00:00.000', N'desc'
+EXEC xp_ReadErrorLog    -- sql server error log. 0 is current log   
+EXEC xp_ReadErrorLog 0,1,N'BISAMDW' -- search sql server error log for BISAMDW character  
+EXEC xp_ReadErrorLog 0
+EXEC xp_ReadErrorLog 0,2 -- sql server agent log
 
 
+--BISAM PROD Weekend Maintance SQL Agent job script for Index Reorg and Rebuild
 
--- Look at recent Full backups for the current database (Query 82) (Recent Full Backups)
-SELECT TOP (30) bs.machine_name, bs.server_name, bs.database_name AS [Database Name], bs.recovery_model,
-CONVERT (BIGINT, bs.backup_size / 1048576 ) AS [Uncompressed Backup Size (MB)],
-CONVERT (BIGINT, bs.compressed_backup_size / 1048576 ) AS [Compressed Backup Size (MB)],
-CONVERT (NUMERIC (20,2), (CONVERT (FLOAT, bs.backup_size) /
-CONVERT (FLOAT, bs.compressed_backup_size))) AS [Compression Ratio], bs.has_backup_checksums, bs.is_copy_only, bs.encryptor_type,
-DATEDIFF (SECOND, bs.backup_start_date, bs.backup_finish_date) AS [Backup Elapsed Time (sec)],
-bs.backup_finish_date AS [Backup Finish Date], bmf.physical_device_name AS [Backup Location], bmf.physical_block_size
-FROM msdb.dbo.backupset AS bs WITH (NOLOCK)
-INNER JOIN msdb.dbo.backupmediafamily AS bmf WITH (NOLOCK)
-ON bs.media_set_id = bmf.media_set_id  
-WHERE bs.database_name = DB_NAME(DB_ID())
-AND bs.[type] = 'D' -- Change to L if you want Log backups
-ORDER BY bs.backup_finish_date DESC OPTION (RECOMPILE);
-------
+EXEC sp_configure 'max degree of parallelism', 12
+reconfigure with override
 
--- Things to look at:
--- Are your backup sizes and times changing over time?
--- Are you using backup compression?
--- Are you using backup checksums?
--- Are you doing copy_only backups?
--- Are you doing encrypted backups?
--- Have you done any backup tuning with striped backups, or changing the parameters of the backup command?
--- Where are the backups going to?
-
--- In SQL Server 2016, native SQL Server backup compression actually works 
--- much better with databases that are using TDE than in previous versions
--- https://bit.ly/28Rpb2x
+EXECUTE dbo.IndexOptimize
+@Databases = 'USER_DATABASES',
+@FragmentationLow = NULL,
+@FragmentationMedium = 'INDEX_REORGANIZE,INDEX_REBUILD_ONLINE',
+@FragmentationHigh = 'INDEX_REBUILD_ONLINE',
+@FragmentationLevel1 = 5,
+@FragmentationLevel2 = 30,
+@PartitionLevel = 'Y',
+@UpdateStatistics = 'ALL',
+@OnlyModifiedStatistics = 'Y',
+@LogToTable = 'Y',
+@TimeLimit = 86400
 
 
--- Get Last Good CheckDB date and time for the current database (Query 83) (Last Good CheckDB)
-SELECT DATABASEPROPERTYEX (DB_NAME(DB_ID()), 'LastGoodCheckDbTime') AS [Last Good CheckDB];
-------
+EXEC sp_configure 'max degree of parallelism', 4
+reconfigure with override
 
--- The date and time of the last successful DBCC CHECKDB that ran on the current database
--- If DBCC CHECKDB has not been run on a database, 1900-01-01 00:00:00.000 is returned
+use performance;
+select 'select count(*) from composites.'+name+' (nolock);' from sys.tables where schema_name(schema_id)='composites'
 
--- DATABASEPROPERTYEX (Transact-SQL)
--- https://bit.ly/3FhvQ41
+EXECUTE [dbo].[DatabaseBackup]
+	@Databases	= 'BISAMDW'			-- BISAMDW Database
+,	@Compress	= 'Y'				-- Use Backup Compression
+,	@Directory	= NULL				-- Backup to default Backup directory
+,	@BackupType	= 'FULL'			-- Full Backup
+,	@Verify		= 'N'				-- Don't verify the Backups (done on system databases only)
+--,	@CleanupTime	= 44				-- Cleanup old Backups after 44 hours (just under 2 days) after the most recent backup is taken ***FJC*** Kill this retention action, commented out
+--,	@CleanupMode	= 'AFTER_BACKUP'	-- Cleanup old Backups after the new backup has been created
+,	@BufferCount	= 200				-- BufferCount, TransferSize and NumberOfFiles based on initial testing
+,	@MaxTransferSize	=	4194304
+,	@NumberOfFiles	= 4
+,	@CheckSum	= 'N'				-- Don't use Backup checksums
+,	@FileExtensionFull	= N'BAK'			-- We keep file extensions consistent with Acadian's existing backup file extensions
+,	@FileExtensionDiff	= N'DIFF'
+,	@FileExtensionLog	= N'TRN'
+,	@LogToTable	= 'Y'				-- Log commands executed to [master].[dbo].[CommandLog]
+
+-- use below for small database backups
+EXECUTE [dbo].[DatabaseBackup]
+	@Databases	= 'USER_DATABASES, -BISAMDW'	-- All User Databases, EXCEPT [BISAMDW]
+,	@Compress	= 'Y'				-- Use Backup Compression
+,	@Directory	= NULL				-- Backup to default Backup directory
+,	@BackupType	= 'FULL'				-- Full Backup
+,	@Verify		= 'N'				-- Don't verify the Backups (done on system databases only)
+--,	@CleanupTime	= 188				-- Cleans up old backups after 188 hours (just under 8 days) after the most recent backup is taken ***FJC*** Kill this retention action, commented out
+--,	@CleanupMode	= 'AFTER_BACKUP'		-- Cleanup old Backups after the new backup has been created
+,	@BufferCount	= 100				-- BufferCount, TransferSize and NumberOfFiles based on initial testing
+,	@MaxTransferSize	=	4194304
+,	@NumberOfFiles	= 2
+,	@CheckSum	= 'N'				-- Don't use Backup checksums
+,	@FileExtensionFull	= N'BAK'			-- We keep file extensions consistent with Acadian's existing backup file extensions
+,	@FileExtensionDiff	= N'DIFF'
+,	@FileExtensionLog	= N'TRN'
+,	@LogToTable	= 'Y'				-- Log commands executed to [master].[dbo].[CommandLog]
+
+SELECT session_id as SPID, command, a.text AS Query, start_time, percent_complete, dateadd(second,estimated_completion_time/1000, getdate()) as estimated_completion_time
+FROM sys.dm_exec_requests r   CROSS APPLY sys.dm_exec_sql_text(r.sql_handle) a
+WHERE r.command in ('BACKUP DATABASE','RESTORE DATABASE')
+--If the database is being restored with NORECOVERY, the Undo phase is skipped. SQL Server does not show the progress during the Redo and Undo phases as it does in the Data Copy phase. So, depending upon the activity in the database at the time it was getting backed up will decide the overall total recovery time.
+
+RESTORE DATABASE [ETLMetadata] FROM  
+DISK = N'\\use1-prod-db01.acadian.am\BACKUP\EC2AMAZ-OSST82Q\ETLMetadata\FULL\EC2AMAZ-OSST82Q_ETLMetadata_FULL_20230101_003000_1.BAK',
+DISK = N'\\use1-prod-db01.acadian.am\BACKUP\EC2AMAZ-OSST82Q\ETLMetadata\FULL\EC2AMAZ-OSST82Q_ETLMetadata_FULL_20230101_003000_2.BAK' 
+WITH  FILE = 1,  MOVE   N'ETLMetaData' TO N'D:\Data\ETLMetaData.mdf',  MOVE  N'ETLMetaData_log' TO N'L:\Log\ETLMetaData_log.ldf',  
+NORECOVERY,  NOUNLOAD,  REPLACE,  STATS = 10, BUFFERCOUNT = 100,  MAXTRANSFERSIZE = 4194304
+
+RESTORE DATABASE [ETLMetadata] FROM  
+DISK = N'\\use1-prod-db01.acadian.am\BACKUP\EC2AMAZ-OSST82Q\ETLMetadata\DIFF\EC2AMAZ-OSST82Q_ETLMetadata_DIFF_20230107_183000.DIFF'
+ WITH  FILE = 1,  MOVE N'ETLMetaData' TO N'D:\Data\ETLMetaData.mdf',  MOVE N'ETLMetaData_log' TO   N'L:\Log\ETLMetaData_log.ldf',
+ RECOVERY, KEEP_CDC, NOUNLOAD,  REPLACE, STATS = 10,  BUFFERCOUNT = 100,  MAXTRANSFERSIZE = 4194304
+ 
+ -- NORECOVERY
+-- RECOVERY, , KEEP_CDC, NOUNLOAD,  REPLACE, STATS = 10,  BUFFERCOUNT = 100,  MAXTRANSFERSIZE = 4194304 					   
+-- use RECOVERY, KEEP_CDC depending on recovery till DIFF back or LOG
+
+RESTORE LOG [ETLMetadata] FROM  DISK = N'\\use1-prod-db01.acadian.am\BACKUP\EC2AMAZ-OSST82Q\ETLMetadata\LOG\EC2AMAZ-OSST82Q_ETLMetadata_LOG_20211124_053000.TRN'
+ WITH  FILE = 1, NOUNLOAD,  STATS = 10 , NORECOVERY
+--RECOVERY, KEEP_CDC  -- use RECOVERY, KEEP_CDC ON FULL DIFF LAST LOG depending on recovery till DIFF back or LOG
+
+-- Recovery step when FULL and DIFF completes and Tran log fails. Get time from BISAM Overnight email 
+-- Get list of Tran logs for BISAM INT recovery
+SELECT  msdb.dbo.backupset.database_name,   msdb.dbo.backupset.backup_start_date,  msdb.dbo.backupset.backup_finish_date, CASE msdb..backupset.type 
+WHEN 'D' THEN 'Database'     WHEN 'L' THEN 'Log'    END AS backup_type,  msdb.dbo.backupset.backup_size,  msdb.dbo.backupmediafamily.physical_device_name,
+msdb.dbo.backupset.first_lsn,msdb.dbo.backupset.last_lsn
+FROM msdb.dbo.backupmediafamily (nolock) INNER JOIN msdb.dbo.backupset (nolock) ON msdb.dbo.backupmediafamily.media_set_id = msdb.dbo.backupset.media_set_id 
+WHERE (CONVERT(datetime, msdb.dbo.backupset.backup_start_date, 102) >= GETDATE() - 1) and msdb.dbo.backupset.database_name='BISAMDW'
+and msdb..backupset.type='L'
+ORDER BY    msdb.dbo.backupset.backup_finish_date asc
+
+--Extract files in SSMS and replace below for all files except last
+RESTORE LOG [BISAMDW] FROM  DISK = N'\\use1-prod-db01.acadian.am\BACKUP\EC2AMAZ-OSST82Q\BISAMDW\LOG\EC2AMAZ-OSST82Q_BISAMDW_LOG_20211124_053000.TRN' 
+ WITH  FILE = 1, NOUNLOAD,  STATS = 10 , NORECOVERY
+
+--  H:\BACKUP\EC2AMAZ-OSST82Q\BISAMDW\LOG\  -> RESTORE LOG [BISAMDW] FROM  DISK = N'\\use1-prod-db01.acadian.am\BACKUP\EC2AMAZ-OSST82Q\BISAMDW\LOG\
+--  .TRN  -> .TRN' WITH  FILE = 1, NOUNLOAD,  STATS = 10 , NORECOVERY
+-- Replace above 2 with last Tran Log and use Recover and KEEP_CDC 
+ 
+ 
+-- Restore bisamdw in sbox1, int has restore full,diff and logs steps
+-- use active batch to rerun restore, takes 2 hours (sbox1 runs full and diff restore, no status for diff)
+-- used in int
+A previous restore operation was interrupted and did not complete processing on file .
+ Either restore the backup set that was interrupted or restart the restore sequence
+   RESTORE LOG [BISAMDW] FROM  DISK = N'\\use1-prod-db01.acadian.am\BACKUP\EC2AMAZ-OSST82Q\BISAMDW\LOG\EC2AMAZ-OSST82Q_BISAMDW_LOG_20220607_004500.TRN' 
+ WITH   FILE = 1, NORECOVERY,  NOUNLOAD,  STATS = 10, CONTINUE_AFTER_ERROR; ---------------------------
+
+RESTORE LOG [BISAMDW] FROM  DISK = N'\\use1-prod-db01.acadian.am\BACKUP\EC2AMAZ-OSST82Q\BISAMDW\LOG\EC2AMAZ-OSST82Q_BISAMDW_LOG_20211124_053000.TRN' 
+WITH  FILE = 1, NOUNLOAD,  STATS = 10 , KEEP_CDC
+
+-- **** Extract file list from windows cmd, create NORECOVERY and last RECOVERY KEEP_CDC script, run AB job for permissions
+
+Stop Sandbox Active batch  These will stop Bone_user connections to DB for refresh ****************
+/Jobs Plans and Folders/Delivery Team Folders/TEAM12/USE1-SBox_BiSam_Utilities/USE1-SBox_Stop_BiSamDataMartLoaderService
+/Jobs Plans and Folders/Delivery Team Folders/TEAM12/USE1-SBox_BiSam_Utilities/USE1-SBox_Stop_BiSam_Services
+
+use master
+go
+RESTORE DATABASE [BISAMDW] FROM 
+DISK = N'\\use1-prod-db01.acadian.am\BACKUP\EC2AMAZ-OSST82Q\BISAMDW\FULL\EC2AMAZ-OSST82Q_BISAMDW_FULL_20220129_193002_1.BAK',  
+DISK = N'\\use1-prod-db01.acadian.am\BACKUP\EC2AMAZ-OSST82Q\BISAMDW\FULL\EC2AMAZ-OSST82Q_BISAMDW_FULL_20220129_193002_2.BAK', 
+DISK = N'\\use1-prod-db01.acadian.am\BACKUP\EC2AMAZ-OSST82Q\BISAMDW\FULL\EC2AMAZ-OSST82Q_BISAMDW_FULL_20220129_193002_3.BAK',
+DISK = N'\\use1-prod-db01.acadian.am\BACKUP\EC2AMAZ-OSST82Q\BISAMDW\FULL\EC2AMAZ-OSST82Q_BISAMDW_FULL_20220129_193002_4.BAK'
+WITH  FILE = 1,MOVE N'BISAMDW' TO N'D:\Data\BISAMDW.mdf',MOVE N'BISAMDW2' TO N'E:\Data2\BISAMDW2.ndf', 
+MOVE  N'BISAMDW3' TO N'F:\Data3\BISAMDW3.ndf',  MOVE N'BISAMDW4' TO N'G:\Data4\BISAMDW4.ndf',
+MOVE  N'BISAMDW_CDC' TO N'D:\Data\BISAMDW_CDC.ndf',  MOVE N'BISAMDW_CDC_ATTR_PERF' TO N'E:\DATA2\BISAMDW_CDC_ATTR_PERF.ndf',
+MOVE  N'BISAMDW_CDC_DATA' TO  N'K:\Data5\BISAMDW_CDC_DATA.ndf',  MOVE N'BISAMDW_log'   TO N'L:\Log\BISAMDW_log.ldf',
+NORECOVERY,  NOUNLOAD, REPLACE,  STATS = 5   -- restoring full with NORECOVERY option
+
+
+RESTORE DATABASE [BISAMDW] FROM  
+DISK = N'\\use1-prod-db01.acadian.am\BACKUP\EC2AMAZ-OSST82Q\BISAMDW\DIFF\EC2AMAZ-OSST82Q_BISAMDW_DIFF_20220201_193002_1.DIFF',  
+DISK = N'\\use1-prod-db01.acadian.am\BACKUP\EC2AMAZ-OSST82Q\BISAMDW\DIFF\EC2AMAZ-OSST82Q_BISAMDW_DIFF_20220201_193002_2.DIFF'
+WITH  FILE = 1,  MOVE N'BISAMDW' TO N'D:\Data\BISAMDW.mdf',  MOVE N'BISAMDW2' TO  N'E:\Data2\BISAMDW2.ndf',  
+MOVE N'BISAMDW3' TO  N'F:\Data3\BISAMDW3.ndf',  MOVE N'BISAMDW4' TO  N'G:\Data4\BISAMDW4.ndf', 
+MOVE N'BISAMDW_CDC' TO N'D:\Data\BISAMDW_CDC.ndf',  MOVE  N'BISAMDW_CDC_ATTR_PERF' TO  N'E:\DATA2\BISAMDW_CDC_ATTR_PERF.ndf',
+MOVE   N'BISAMDW_CDC_DATA' TO  N'K:\Data5\BISAMDW_CDC_DATA.ndf',  MOVE N'BISAMDW_log'   TO N'L:\Log\BISAMDW_log.ldf',
+NORECOVERY,  NOUNLOAD, REPLACE,  STATS = 5    -- use NORECOVERY for BISAM INT Diff restore, use RECOVERY, KEEP_CDC	with last tran log restore
+RECOVERY, KEEP_CDC	, REPLACE,  STATS = 5	    -- use RECOVERY and KEEP_CDC for BISAM Sandbox1 Diff restore, 
+-- Run post refresh AB job
+
+Sbox1 ETLMetadata 1) Full & Diff  2) NoRecovery  3) Recovery KeepCDC
+# uncomment after 3/20 refresh Restore-DbaDatabase -SqlInstance 'use1-sbox-db01.sandbox.acadian.am' -Path '\\use1-prod-db01.acadian.am\BACKUP\EC2AMAZ-OSST82Q\ETLMetadata\FULL','\\use1-prod-db01.acadian.am\BACKUP\EC2AMAZ-OSST82Q\ETLMetadata\DIFF' -MaxTransferSize 4194304 -BufferCount 100 -WithReplace -ReuseSourceFolderStructure -KeepCDC
+
+#Restore-DbaDatabase -SqlInstance 'use1-sbox-db01.sandbox.acadian.am' -DatabaseName "ETLMetadata" -ReplaceDbNameInFile -Path '\\use1-prod-db01.acadian.am\BACKUP\EC2AMAZ-OSST82Q\ETLMetadata\FULL','\\use1-prod-db01.acadian.am\BACKUP\EC2AMAZ-OSST82Q\ETLMetadata\DIFF' -WithReplace -NoRecovery -ReuseSourceFolderStructure -EnableException -WarningAction Stop
+#Restore-DbaDatabase -SqlInstance 'use1-sbox-db01.sandbox.acadian.am' -DatabaseName "ETLMetadata" -ReplaceDbNameInFile -Path '\\use1-prod-db01.acadian.am\BACKUP\EC2AMAZ-OSST82Q\ETLMetadata\LOG' -WithReplace -NoRecovery -Continue
+#Restore-DbaDatabase -SqlInstance 'use1-sbox-db01.sandbox.acadian.am' -DatabaseName "ETLMetadata" -ReplaceDbNameInFile -Path '\\use1-prod-db01.acadian.am\BACKUP\EC2AMAZ-OSST82Q\ETLMetadata\LOG' -WithReplace -KeepCDC -Continue -EnableException -WarningAction Stop # @WarningToDo -W
+
+
+Sbox1 BISAMDW 1) Full & Diff  2) NoRecovery  3) Recovery KeepCDC
+#Restore-DbaDatabase -SqlInstance 'use1-sbox-db01.sandbox.acadian.am' -Path '\\use1-prod-db01.acadian.am\BACKUP\EC2AMAZ-OSST82Q\BISAMDW\FULL','\\use1-prod-db01.acadian.am\BACKUP\EC2AMAZ-OSST82Q\BISAMDW\DIFF' -WithReplace -NoRecovery -ReuseSourceFolderStructure -EnableException -WarningAction Stop
+#Restore-DbaDatabase -SqlInstance 'use1-sbox-db01.sandbox.acadian.am' -Path '\\use1-prod-db01.acadian.am\BACKUP\EC2AMAZ-OSST82Q\BISAMDW\LOG' -WithReplace -NoRecovery -Continue
+#Restore-DbaDatabase -SqlInstance 'use1-sbox-db01.sandbox.acadian.am' -Path '\\use1-prod-db01.acadian.am\BACKUP\EC2AMAZ-OSST82Q\BISAMDW\LOG' -WithReplace -KeepCDC -Continue -EnableException -WarningAction Stop # @WarningToDo -W
+
+
+**Morning BISAMDW comment Full+Diff
+Run NoRecovery, then comment
+Run Recovery CDC
+
+					   
+-- Table size				   
+SELECT  t.NAME AS TableName, s.Name AS SchemaName, p.rows, SUM(a.total_pages) * 8 AS TotalSpaceKB, 
+    CAST(ROUND(((SUM(a.total_pages) * 8) / 1024.00), 2) AS NUMERIC(36, 2)) AS TotalSpaceMB,
+    SUM(a.used_pages) * 8 AS UsedSpaceKB,  CAST(ROUND(((SUM(a.used_pages) * 8) / 1024.00), 2) AS NUMERIC(36, 2)) AS UsedSpaceMB, 
+    (SUM(a.total_pages) - SUM(a.used_pages)) * 8 AS UnusedSpaceKB,   CAST(ROUND(((SUM(a.total_pages) - SUM(a.used_pages)) * 8) / 1024.00, 2) AS NUMERIC(36, 2)) AS UnusedSpaceMB
+FROM     sys.tables t INNER JOIN  sys.indexes i ON t.OBJECT_ID = i.object_id
+INNER JOIN  sys.partitions p ON i.object_id = p.OBJECT_ID AND i.index_id = p.index_id
+INNER JOIN  sys.allocation_units a ON p.partition_id = a.container_id
+LEFT OUTER JOIN sys.schemas s ON t.schema_id = s.schema_id
+WHERE  t.NAME NOT LIKE 'dt%'   AND t.is_ms_shipped = 0   AND i.OBJECT_ID > 255 
+GROUP BY   t.Name, s.Name, p.Rows ORDER BY   TotalSpaceMB DESC, t.Name
+-- This will calculate size for each table partition, remove p.Rows in group by to get total MB size
+
+-- update statistics powershell script modification_counter >20000 Active Batch job runs at 10 PM daily
+$hostnames =  Invoke-Sqlcmd -ServerInstance BOS-DBCENTRAL01 -Database DBMetrics -Query "select ServerName as ServerName From dbo.dbaHealthCheckServers  Where ServerName in ('BOS-DB02')"  # Get-Content $server_file
+ForEach ($hostname in $hostnames) { 
+$results = Invoke-Sqlcmd -ServerInstance $hostname.ServerName -Query "Select name dbname From sys.databases d where d.database_id > 4 AND d.name <> 'Scratch' AND is_read_only = 0 Order By 1"
+ForEach ($result in $results) {
+$statsresults = Invoke-Sqlcmd -ServerInstance $hostname.ServerName -Database $result.dbname -Query "SELECT DB_Name() DatabaseName, OBJECT_SCHEMA_NAME(obj.object_id) schemaName, obj.name TableName, 
+            stat.name, modification_counter, 
+            [rows], rows_sampled, rows_sampled* 100 / [rows] AS [% Rows Sampled],
+            last_updated
+FROM        sys.objects AS obj
+INNER JOIN  sys.stats AS stat ON stat.object_id = obj.object_id
+CROSS APPLY sys.dm_db_stats_properties(stat.object_id, stat.stats_id) AS sp
+WHERE       obj.is_ms_shipped = 0
+and last_updated is not null and modification_counter > 20000
+--AND last_updated < DateAdd(day, -8,GetDate())
+AND [rows] >= 20000
+AND rows_sampled * 100 / [rows] > 10
+ORDER BY    last_updated , modification_counter DESC"
+#$statsresults #| Export-Csv -Path $filename -NoTypeInformation -Append
+ForEach ($stats in $statsresults) {
+$variables = @(
+    "Var1 = '$stats.TableName'",
+    "Var2 = '$stats.name'"
+)
+$query = "Update Statistics " + $stats.schemaName + "." + $stats.TableName + " " + $stats.name #+ " -- " + $stats.DatabaseName + " " + $hostname.ServerName
+Invoke-Sqlcmd -ServerInstance $hostname.ServerName -Database $stats.DatabaseName -Query $query 
+
+
+    }
+}
+}
+
+https://docs.microsoft.com/en-us/sql/t-sql/statements/alter-authorization-transact-sql?view=sql-server-ver15 
+Use DataWarehouse
+GO
+DECLARE @Command VARCHAR(MAX) = 'ALTER AUTHORIZATION ON DATABASE::[<<DatabaseName>>] TO 
+[<<LoginName>>]' 
+
+SELECT @Command = REPLACE(REPLACE(@Command 
+            , '<<DatabaseName>>', SD.Name)
+            , '<<LoginName>>', SL.Name)
+FROM master..sysdatabases SD 
+JOIN master..syslogins SL ON  SD.SID = SL.SID
+WHERE  SD.Name = DB_NAME()
+
+PRINT @Command
+EXEC(@Command)
+
+
+--ALTER AUTHORIZATION ON DATABASE::[DataWarehouse] TO [ACADIAN\SQLDEV]
+--ALTER AUTHORIZATION ON DATABASE::[DataWarehouse] TO [ACADIAN\svc_devboneetl]
+
+
+-- list all filegroups
+select * from sys.data_spaces where type='FG'
+-- filegroups which has a corresponding allocation(table, index)
+select FILEGROUP_NAME(data_space_id),* from sys.allocation_units 
+where data_space_id=4 -- 4 for CDC_DATA_ATTR_PERF
+-- Filegroup and corresponding Table and Index and size
+SELECT FILEGROUP_NAME(AU.data_space_id) AS FileGroup,OBJECT_NAME(Parti.object_id) AS TableName,
+ind.name AS ClusteredIndexName,AU.data_pages/128 AS DataSize_MB 
+FROM sys.allocation_units AS AU INNER JOIN sys.partitions AS Parti 
+ON AU.container_id = CASE WHEN AU.type in(1,3) THEN Parti.hobt_id ELSE Parti.partition_id END
+LEFT JOIN sys.indexes AS ind ON ind.object_id = Parti.object_id AND ind.index_id = Parti.index_id
+--where FILEGROUP_NAME(AU.data_space_id)='CDC_DATA_ATTR_PERF'
+ORDER BY FILEGROUP_NAME(AU.data_space_id), AU.total_pages/128 DESC
+
+select * from msdb.dbo.sysmail_mailitems order by send_request_date desc
+	EXEC msdb.dbo.sp_send_dbmail 
+		@recipients = 'rkumar@acadian-asset.com', 
+		@subject = @Subject,
+		@from_address = 'activefx@acadian-asset.com',
+		@importance='High',
+		@body_format = 'TEXT',
+		@body = @Body
+
+
+-- extract role grants for a user ----------------------------------------------------------------------------------------------------
+SELECT 'EXEC sp_addrolemember ''' + DBRole.NAME + ''', ''' + DBUser.NAME + '''' AS '--Add Users to Database Roles--'
+FROM sys.database_principals DBUser
+INNER JOIN sys.database_role_members DBM ON DBM.member_principal_id = DBUser.principal_id
+INNER JOIN sys.database_principals DBRole ON DBRole.principal_id = DBM.role_principal_id
+and DBUser.NAME='ACADIAN\svc_actvbsqluser'
+----------------------------------------------------------------------------------------------------------------------------------------------
+
+-- June 1 2022 ,after increasing column size from 12 to 40, Table views were throwing error from linked server(bisam to dbcore), below is the fix
+use Acadian
+go
+exec sp_refreshview '[bisam].[VWbsmNAVExtract]'
+go
+exec sp_refreshview '[bisam].[VWbsmTax-CAExtract]'
+go
+SELECT *  FROM [L-DBCORE].[Acadian].[bisam].[VWbsmTax-CAExtract] where ExtractId = 149225
+
+-- Role extract script 1 starts here ----------------------------------------------------------------------------------------------
+use DataWarehouse
+go
+DECLARE @roleName VARCHAR(255)
+SET @roleName = 'PerformanceAndAttributionReportingRole'
+
+-- Script out the Role
+DECLARE @roleDesc VARCHAR(MAX), @crlf VARCHAR(2)
+SET @crlf = CHAR(13) + CHAR(10)
+SET @roleDesc = 'CREATE ROLE [' + @roleName + ']' + @crlf + 'GO' + @crlf + @crlf
+
+SELECT    @roleDesc = @roleDesc +
+        CASE dp.state
+            WHEN 'D' THEN 'DENY '
+            WHEN 'G' THEN 'GRANT '
+            WHEN 'R' THEN 'REVOKE '
+            WHEN 'W' THEN 'GRANT '
+        END + 
+        dp.permission_name + ' ' +
+        CASE dp.class
+            WHEN 0 THEN ''
+            WHEN 1 THEN --table or column subset on the table
+                CASE WHEN dp.major_id < 0 THEN
+                    + 'ON [sys].[' + OBJECT_NAME(dp.major_id) + '] '
+                ELSE
+                    + 'ON [' +
+                    (SELECT SCHEMA_NAME(schema_id) + '].[' + name FROM sys.objects WHERE object_id = dp.major_id)
+                        + -- optionally concatenate column names
+                    CASE WHEN MAX(dp.minor_id) > 0 
+                         THEN '] ([' + REPLACE(
+                                        (SELECT name + '], [' 
+                                         FROM sys.columns 
+                                         WHERE object_id = dp.major_id 
+                                            AND column_id IN (SELECT minor_id 
+                                                              FROM sys.database_permissions 
+                                                              WHERE major_id = dp.major_id
+                                                                AND USER_NAME(grantee_principal_id) IN (@roleName)
+                                                             )
+                                         FOR XML PATH('')
+                                        ) --replace final square bracket pair
+                                    + '])', ', []', '')
+                         ELSE ']'
+                    END + ' '
+                END
+            WHEN 3 THEN 'ON SCHEMA::[' + SCHEMA_NAME(dp.major_id) + '] '
+            WHEN 4 THEN 'ON ' + (SELECT RIGHT(type_desc, 4) + '::[' + name FROM sys.database_principals WHERE principal_id = dp.major_id) + '] '
+            WHEN 5 THEN 'ON ASSEMBLY::[' + (SELECT name FROM sys.assemblies WHERE assembly_id = dp.major_id) + '] '
+            WHEN 6 THEN 'ON TYPE::[' + (SELECT name FROM sys.types WHERE user_type_id = dp.major_id) + '] '
+            WHEN 10 THEN 'ON XML SCHEMA COLLECTION::[' + (SELECT SCHEMA_NAME(schema_id) + '.' + name FROM sys.xml_schema_collections WHERE xml_collection_id = dp.major_id) + '] '
+            WHEN 15 THEN 'ON MESSAGE TYPE::[' + (SELECT name FROM sys.service_message_types WHERE message_type_id = dp.major_id) + '] '
+            WHEN 16 THEN 'ON CONTRACT::[' + (SELECT name FROM sys.service_contracts WHERE service_contract_id = dp.major_id) + '] '
+            WHEN 17 THEN 'ON SERVICE::[' + (SELECT name FROM sys.services WHERE service_id = dp.major_id) + '] '
+            WHEN 18 THEN 'ON REMOTE SERVICE BINDING::[' + (SELECT name FROM sys.remote_service_bindings WHERE remote_service_binding_id = dp.major_id) + '] '
+            WHEN 19 THEN 'ON ROUTE::[' + (SELECT name FROM sys.routes WHERE route_id = dp.major_id) + '] '
+            WHEN 23 THEN 'ON FULLTEXT CATALOG::[' + (SELECT name FROM sys.fulltext_catalogs WHERE fulltext_catalog_id = dp.major_id) + '] '
+            WHEN 24 THEN 'ON SYMMETRIC KEY::[' + (SELECT name FROM sys.symmetric_keys WHERE symmetric_key_id = dp.major_id) + '] '
+            WHEN 25 THEN 'ON CERTIFICATE::[' + (SELECT name FROM sys.certificates WHERE certificate_id = dp.major_id) + '] '
+            WHEN 26 THEN 'ON ASYMMETRIC KEY::[' + (SELECT name FROM sys.asymmetric_keys WHERE asymmetric_key_id = dp.major_id) + '] '
+         END COLLATE SQL_Latin1_General_CP1_CI_AS
+         + 'TO [' + @roleName + ']' + 
+         CASE dp.state WHEN 'W' THEN ' WITH GRANT OPTION' ELSE '' END + @crlf
+FROM    sys.database_permissions dp
+WHERE    USER_NAME(dp.grantee_principal_id) IN (@roleName)
+GROUP BY dp.state, dp.major_id, dp.permission_name, dp.class
+
+SELECT @roleDesc = @roleDesc + 'GO' + @crlf + @crlf      
+
+-- Display users within Role.  Code stubbed by Joe Spivey
+SELECT  @roleDesc = @roleDesc + 'EXECUTE sp_AddRoleMember ''' + roles.name + ''', ''' + users.name + '''' + @crlf
+FROM    sys.database_principals users
+        INNER JOIN sys.database_role_members link 
+            ON link.member_principal_id = users.principal_id
+        INNER JOIN sys.database_principals roles 
+            ON roles.principal_id = link.role_principal_id
+WHERE   roles.name = @roleName
+
+-- PRINT out in blocks of up to 8000 based on last \r\n
+DECLARE @printCur INT
+SET @printCur = 8000
+
+WHILE LEN(@roleDesc) > 8000
+BEGIN
+    -- Reverse first 8000 characters and look for first lf cr (reversed crlf) as delimiter
+    SET @printCur = 8000 - CHARINDEX(CHAR(10) + CHAR(13), REVERSE(SUBSTRING(@roleDesc, 0, 8000)))
+
+    PRINT LEFT(@roleDesc, @printCur)
+    SELECT @roleDesc = RIGHT(@roleDesc, LEN(@roleDesc) - @printCur)
+END
+
+-- Output new permissions
+PRINT @roleDesc + 'GO'
+-- Role extract script 1  ends  ----------------------------------------------------------------------------------------------
 
 
 
+-- Role extract script 2 starts ----------------------------------------------------------------------------------------------
+
+WITH    perms_cte as
+(
+        select USER_NAME(p.grantee_principal_id) AS principal_name,
+                dp.principal_id,
+                dp.type_desc AS principal_type_desc,
+                p.class_desc,
+                OBJECT_NAME(p.major_id) AS object_name,
+                p.permission_name,
+                p.state_desc AS permission_state_desc
+        from    sys.database_permissions p
+        inner   JOIN sys.database_principals dp
+        on     p.grantee_principal_id = dp.principal_id
+)
+--role members
+-- add schema name
+SELECT  concat( p.permission_state_desc,' ',p.permission_name,' on warehouse.',p.object_name,' to ',rm.role_name)
+FROM    perms_cte p
+right outer JOIN (
+    select role_principal_id, dp.type_desc as principal_type_desc, 
+   member_principal_id,user_name(member_principal_id) as member_principal_name,
+   user_name(role_principal_id) as role_name--,*
+    from    sys.database_role_members rm
+    INNER   JOIN sys.database_principals dp
+    ON     rm.member_principal_id = dp.principal_id and user_name(role_principal_id) in('PerformanceAndAttributionReportingRole','WebAnalyticsRole')
+	and user_name(member_principal_id)='sql_devreportingservice'
+) rm
+ON     rm.role_principal_id = p.principal_id
+
+order by 1
+
+-- role extract script2 ends here ----------------------------------------------------------------------------------------------
 
 
 
+-- powershell to capture DB stats
+$hostname =  ("BOS-DBWH02") 
+$db = ("AccountPerformance")
+$statsresults = Invoke-Sqlcmd -ServerInstance $hostname -Database $db -Query "SELECT DB_Name() DatabaseName, OBJECT_SCHEMA_NAME(obj.object_id) schemaName, obj.name TableName, 
+            stat.name, modification_counter, 
+            [rows], rows_sampled, rows_sampled* 100 / [rows] AS [% Rows Sampled],
+            last_updated
+FROM        sys.objects AS obj
+INNER JOIN  sys.stats AS stat ON stat.object_id = obj.object_id
+CROSS APPLY sys.dm_db_stats_properties(stat.object_id, stat.stats_id) AS sp
+WHERE       obj.is_ms_shipped = 0
+and last_updated is not null and modification_counter > 20000
+AND [rows] >= 20000
+AND rows_sampled * 100 / [rows] > 10
+ORDER BY    last_updated , modification_counter DESC
+"
+
+ForEach ($stats in $statsresults) {
+$variables = @(
+    "Var1 = '$stats.TableName'",
+    "Var2 = '$stats.name'"
+)
+$query = "Update Statistics " + $stats.schemaName + "." + $stats.TableName + " " + $stats.name 
+Invoke-Sqlcmd -ServerInstance $hostname -Database $stats.DatabaseName -Query $query 
+
+    }	
+-- powershell to capture DB stats ends here	
+
+
+--Windows disk space powershell
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'This procedure runs DBCC FREEPROCCACHE to flush longest running plan hash based on total_elapsed_time and using PERF_ATTRIB_END_DATE_IDX' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'PROCEDURE',@level1name=N'aamSPAttrPerfAttributionCountPlanFlush'
+GO
+EXEC sys.sp_addextendedproperty @name=N'MS_Sample_Call', @value=N'exec BISAMDW.dbo.aamSPAttrPerfAttributionCountPlanFlush;' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'PROCEDURE',@level1name=N'aamSPAttrPerfAttributionCountPlanFlush'
+GO
+
+Get-WmiObject -Class Win32_LogicalDisk |
+Select-Object -Property DeviceID, VolumeName, @{Label='FreeSpace (Gb)'; expression={($_.FreeSpace/1GB).ToString('F2')}},
+@{Label='Total (Gb)'; expression={($_.Size/1GB).ToString('F2')}},
+@{label='FreePercent'; expression={[Math]::Round(($_.freespace / $_.size) * 100, 2)}}|ft
+		
+ SELECT [MappingId],[LoginName],[LoginTypeId] ,[ParentMappingId]
+  FROM [master].[dbo].[ServiceAccountMapping]  where LoginName like 'svc%' order by MappingId
+
+ exec sp_helplogins 'svc_qasnowperf' 
+ exec sp_helplogins 'svc_qasqltableau'	
+ -- sp_helprotect grants to a Role, run for each database, does not return info about Securables
+use Optimizer   sp_helprotect NULL,'AAMTableauReportsRole'         use IdexData   sp_helprotect NULL,'pag_dq_check'
+
+					   
+ -- make sure that DB grants in dev,qa are not wiped after DB refresh from prod
+C:\dev\git_repo\performance\acct-perf-master\database-mssql\dbwh02\AccountPerformance\principals\roles\
+ use AccountPerformance
+go
+if not exists(select * from sys.database_principals where type = 'R' and name = 'ActiveBatchRole')
+begin
+create role ActiveBatchRole
+end
+GRANT SELECT,INSERT,UPDATE,DELETE,EXECUTE ON SCHEMA :: [acctperf] TO ActiveBatchRole
+
+USE AccountPerformance
+
+DECLARE @Environment VARCHAR(5)
+EXEC DataWarehouse.dbo.sp_get_environment @Environment=@Environment OUTPUT
+
+IF @Environment='DEV'
+BEGIN
+	IF NOT EXISTS (SELECT * FROM sys.database_principals where type = 'U' and name = 'ACADIAN\svc_actvbsqlusertst')
+	BEGIN
+	   PRINT 'Creating svc_actvbsqlusertst user'
+	   create user [ACADIAN\svc_actvbsqlusertst] from login [ACADIAN\svc_actvbsqlusertst]
+	END
+	ALTER ROLE ActiveBatchRole ADD MEMBER [ACADIAN\svc_actvbsqlusertst]
+END
+
+IF @Environment='QA'
+BEGIN
+	IF NOT EXISTS (SELECT * FROM sys.database_principals where type = 'U' and name = 'ACADIAN\svc_actvbsqlusertst')
+	BEGIN
+	   PRINT 'Creating svc_actvbsqlusertst user'
+	   create user [ACADIAN\svc_actvbsqlusertst] from login [ACADIAN\svc_actvbsqlusertst]
+	END
+	ALTER ROLE ActiveBatchRole ADD MEMBER [ACADIAN\svc_actvbsqlusertst]
+END
+
+IF @Environment='UAT'
+BEGIN
+	IF NOT EXISTS (SELECT * FROM sys.database_principals where type = 'U' and name = 'ACADIAN\svc_actvbsqlusertst')
+	BEGIN
+	   PRINT 'Creating svc_actvbsqlusertst user'
+	   create user [ACADIAN\svc_actvbsqlusertst] from login [ACADIAN\svc_actvbsqlusertst]
+	END
+	ALTER ROLE ActiveBatchRole ADD MEMBER [ACADIAN\svc_actvbsqlusertst]
+END
+
+IF @Environment='PROD'
+BEGIN
+	IF NOT EXISTS (SELECT * FROM sys.database_principals where type = 'U' and name = 'ACADIAN\svc_actvbsqluser')
+	BEGIN
+	   PRINT 'Creating svc_actvbsqluser user'
+	   create user [ACADIAN\svc_actvbsqluser] from login [ACADIAN\svc_actvbsqluser]
+	END
+	ALTER ROLE ActiveBatchRole ADD MEMBER [ACADIAN\svc_actvbsqluser]
+END
+
+
+ 
+USE [performance]
+GO
+
+DECLARE @Environment VARCHAR(5);
+EXEC master.dbo.sp_get_environment @Environment=@Environment OUTPUT;
+
+IF @Environment='DEV'
+begin
+    IF NOT EXISTS(select *
+    from sys.database_principals
+    where name = 'svc_devsnowperf')
+	BEGIN
+        CREATE USER svc_devsnowperf FOR LOGIN [svc_devsnowperf]
+    END
+    ALTER USER svc_devsnowperf WITH DEFAULT_SCHEMA=[dbo]
+    GRANT CONNECT TO svc_devsnowperf
+
+    ALTER ROLE [AAMSnowPerfRole] ADD MEMBER svc_devsnowperf
+end
+
+IF @Environment='QA'
+begin
+    IF NOT EXISTS(select *
+    from sys.database_principals
+    where name = 'svc_qasnowperf')
+	BEGIN
+        CREATE USER svc_qasnowperf FOR LOGIN [svc_qasnowperf]
+    END
+    ALTER USER svc_qasnowperf WITH DEFAULT_SCHEMA=[dbo]
+    GRANT CONNECT TO svc_qasnowperf
+
+    ALTER ROLE [AAMSnowPerfRole] ADD MEMBER svc_qasnowperf
+end
+
+IF @Environment='PROD'
+begin
+    IF NOT EXISTS(select *
+    from sys.database_principals
+    where name = 'svc_snowperf')
+	BEGIN
+        CREATE USER svc_snowperf FOR LOGIN [svc_snowperf]
+    END
+    ALTER USER svc_snowperf WITH DEFAULT_SCHEMA=[dbo]
+    GRANT CONNECT TO svc_snowperf
+
+    ALTER ROLE [AAMSnowPerfRole] ADD MEMBER svc_snowperf
+end
+					   
+	
 
 
 
+----on BISAM Prod ( use1-prod-db01)
+https://git.acadian-asset.com/bisam/database-mssql/-/blob/master/DBBONE01/master/Principals/Logins/svc_sqlweb.sql
+ svc_sqlweb.sql 
+USE master
+ 
+DECLARE @Environment VARCHAR(5)
+EXEC sp_get_environment @Environment=@Environment OUTPUT
+PRINT @Environment
+
+IF @Environment='SBOX'
+BEGIN
+    IF NOT EXISTS (SELECT name FROM [sys].[server_principals] WHERE name = N'ACADIAN\svc_devsqlrs')
+       CREATE LOGIN [ACADIAN\svc_devsqlrs] FROM WINDOWS WITH DEFAULT_DATABASE=[master]
+END
+
+IF @Environment='INT'
+BEGIN
+    IF NOT EXISTS (SELECT name FROM [sys].[server_principals] WHERE name = N'ACADIAN\svc_qasqlrs')
+       CREATE LOGIN [ACADIAN\svc_qasqlrs] FROM WINDOWS WITH DEFAULT_DATABASE=[master]
+END
+
+IF @Environment='PROD'
+BEGIN
+    IF NOT EXISTS (SELECT name FROM [sys].[server_principals] WHERE name = N'ACADIAN\svc_sqlweb')
+       CREATE LOGIN [ACADIAN\svc_sqlweb] FROM WINDOWS WITH DEFAULT_DATABASE=[master]
+END
+
+	
+
+					   
+DECLARE @today date
+SELECT @today = getdate()
+select dateadd(day, (-1 * datepart(day, @today)) + 1, @today) as first_day_of_curr_month
+select dateadd(day, -1, dateadd(month, 1, dateadd(day, (-1 * datepart(day, @today)) + 1, @today))) as last_day_of_curr_month					   
+					   
+ 
+-- Script to get data between start LSN and end LSN or date time from CDC CT tables ----------------------------------------------
+use accounting
+go
+
+declare @StartTS datetime = '2022-05-06 00:00:00 AM',
+        @StartLSN binary(10),
+        @EndTS datetime  = '2022-05-09 08:00:00 AM',
+        @EndLSN binary(10)
+
+select @StartLSN = sys.fn_cdc_map_time_to_lsn('smallest greater than or equal', @StartTS),
+       @EndLSN = sys.fn_cdc_map_time_to_lsn('largest less than or equal', @EndTS)
+
+select '@StartTS' = @StartTS, '@StartLSN' = @StartLSN, '@EndTS' = @EndTS, '@EndLSN' = @EndLSN
+/*
+@StartTS	            @StartLSN	            @EndTS	                @EndLSN
+======================= ======================  ======================= ======================
+2022-05-06 00:00:00.000	0x0021881A000AFD2F0001	2022-05-09 08:00:00.000	0x0021881A000AFB140001
+*/
+
+select h.PortfolioOldCode, 'minPriceDate' = min(h.PriceDate)
+  from accounting.cdc.dbo_ph_staging_table_CT h (nolock)
+  where h.__$start_lsn >= @StartLSN
+    and h.__$start_lsn <=@EndLSN
+    and h.__$operation in (2, 4)
+  group by h.PortfolioOldCode
+  order by h.PortfolioOldCode
+go
+
+-- End of Script to get data between start LSN and end LSN or date time from CDC CT tables ----------------------------------------------
+
+RESTORE DATABASE [MasterData] FROM  DISK = N'D:\MasterDataProdBackup\MasterData1.bak',  DISK = N'D:\MasterDataProdBackup\MasterData2.bak' WITH  FILE = 1,  MOVE N'MasterData_Data01' TO                           N'C:\SQL\bos-dbcore01\data02\MasterData_Data01.mdf',  MOVE N'MasterData_CDC' TO N'C:\SQL\bos-dbcore01\data02\MasterData_CDC.ndf', 
+MOVE N'MasterData_Data02' TO N'C:\SQL\bos-dbcore01\data02\MasterData_Data02.ndf',  MOVE N'MasterData_Data03' TO    N'C:\SQL\bos-dbcore01\data02\MasterData_Data03.ndf',  MOVE N'MasterData_Data04' TO    N'C:\SQL\bos-dbcore01\data02\MasterData_Data04.ndf',  MOVE N'MasterData_Data05' TO     N'C:\SQL\bos-dbcore01\data02\MasterData_Data05.ndf',  MOVE N'MasterData_Data06' TO                     N'C:\SQL\bos-dbcore01\data02\MasterData_Data06.ndf',  MOVE N'MasterData_Data07' TO    N'C:\SQL\bos-dbcore01\data02\MasterData_Data07.ndf',  MOVE N'MasterData_Data08' TO                        N'C:\SQL\bos-dbcore01\data02\MasterData_Data08.ndf',  MOVE N'MasterData_log' TO N'C:\SQL\bos-dbcore01\data02\MasterData_Log.ldf',   NOUNLOAD,  REPLACE,  STATS = 10,  BUFFERCOUNT = 300,
+MAXTRANSFERSIZE = 41943
