@@ -232,8 +232,8 @@ select database_id,db_name(database_id),object_id,object_name(object_id),cached_
 select database_id,db_name(database_id),object_id,object_name(object_id),cached_time, last_execution_time, execution_count from sys.dm_exec_procedure_stats where object_name(object_id)='SPrptHoldingsSnapshot'
 select * from master.[dbo].[dbaProcedureUsage] (nolock) where ProcName='SPrptHoldingsSnapshot'
 
-https://git.AXYZ-asset.com/trading-investments/crd/database-mssql/-/merge_requests/728/diffs
-https://git.AXYZ-asset.com/trading-investments/crd/database-mssql/-/blob/master/CORE/AXYZ/AUX%20Scripts/Alter/crdTradeExport_Index.sql 
+https://git.AXYZ/trading-investments/crd/database-mssql/-/merge_requests/728/diffs
+https://git.AXYZ/trading-investments/crd/database-mssql/-/blob/master/CORE/AXYZ/AUX%20Scripts/Alter/crdTradeExport_Index.sql 
 USE [AXYZ]
 GO
 
@@ -300,7 +300,7 @@ DBCC TRACEON(1204,1222,-1)
 DBCC TRACESTATUS(-1)
 DBCC TRACEOff(1204,1222,-1)
 
--- April 12 2023 Saravana dbrnd02-dev01/03 [Reference].[dbo].[refSecurityCreditICEMarketData] Vault dev entry https://vault.service.dev.AXYZ-asset.com/ui/vault/secrets/secret/show/avm/AXYZ-trading/hasura/dbrnd02_password 
+-- April 12 2023 Saravana dbrnd02-dev01/03 [Reference].[dbo].[refSecurityCreditICEMarketData] Vault dev entry https://vault.service.dev.AXYZ/ui/vault/secrets/secret/show/avm/AXYZ-trading/hasura/dbrnd02_password 
 CREATE LOGIN [sql_dev_TradingHasura] WITH PASSWORD=N'tRowEL1cIr10', DEFAULT_DATABASE=[Reference],CHECK_EXPIRATION=OFF, CHECK_POLICY=OFF
 CREATE LOGIN [svc_devperfdataquality] WITH PASSWORD=N'1Zyo1649XNEj', DEFAULT_DATABASE=[AccountPerformance],CHECK_EXPIRATION=OFF, CHECK_POLICY=OFF
 CREATE LOGIN [svc_pag_dq_check] WITH PASSWORD=N'xxxxxxx', DEFAULT_DATABASE=[master],CHECK_EXPIRATION=OFF, CHECK_POLICY=OFF
@@ -319,7 +319,7 @@ sp_who3
 sp_who2 active
 sp_help 'BISAMDW.dbo.ATTR_PERF_ATTRIBUTION'
 
-SQL server and other software location  \\AXYZ-asset.com\Admin\pcadmin\Applications\Microsoft\SQLServer2017
+SQL server and other software location  \\AXYZ\Admin\pcadmin\Applications\Microsoft\SQLServer2017
 aws s3 rm s3://great-plains-production-db-backup --recursive
 #Full BKP Sync
 [String]$ComputerName = $env:COMPUTERNAME.ToUpper()
@@ -379,7 +379,7 @@ GO
 #####################################################################################################################################
 Steps to enable CDC on BISAMDW and replicate changes to BOS-DBWH02 PROD. Follow 
 
-PSD-909  2 step process  1) Enable CDC and grants in BISAMDW and replicate changes to Datawarehouse for T_COUNTRY table (use git post script for changes) https://git.AXYZ-asset.com/performance/bisam/warehouse-loader/database-mssql/-/blob/master/DBBONE01/BISAMDW/Scripts/PostDeployment/008-PMA-961%20Add%20T_Country%20to%20cdc.sql
+PSD-909  2 step process  1) Enable CDC and grants in BISAMDW and replicate changes to Datawarehouse for T_COUNTRY table (use git post script for changes) https://git.AXYZ/performance/bisam/warehouse-loader/database-mssql/-/blob/master/DBBONE01/BISAMDW/Scripts/PostDeployment/008-PMA-961%20Add%20T_Country%20to%20cdc.sql
 	1) Senthil did steps on BOS-DBWH02 side PSD-909 
 Reference doc https://AXYZ-asset.atlassian.net/wiki/spaces/PD/pages/47349767/Add+New+Tables+Columns+To+DataWarehouse
 USE BISAMDW
@@ -467,9 +467,9 @@ SELECT  a.[MappingId],a.[LoginName], b.LoginName,a.[LoginTypeId],a.[ParentMappin
 --master.dbo.sp_AAM_CreateNewAccountForAllDb @ProdLogin,@DevLogin
 --master.dbo.sp_AAM_CreateAccountForSingleDb
 -- Refresh post script DBCore,  If roles are present with same name in prod,qa,dev they are mapped and granted using [master].[dbo].[ServiceAccountMapping] Table
--- https://git.AXYZ-asset.com/DO/RefreshAutomation/-/blob/master/CORE/11-CloneProductionPermissions.sql executes sp_AAM_CreateAccountForSingleDb(create user for login) sp_AAM_CreateNewAccountForAllDb
+-- https://git.AXYZ/DO/RefreshAutomation/-/blob/master/CORE/11-CloneProductionPermissions.sql executes sp_AAM_CreateAccountForSingleDb(create user for login) sp_AAM_CreateNewAccountForAllDb
 -- Refresh post script DBWH02
--- https://git.AXYZ-asset.com/DO/RefreshAutomation/-/blob/master/WH02/98_Access_for_FCunningham.sql
+-- https://git.AXYZ/DO/RefreshAutomation/-/blob/master/WH02/98_Access_for_FCunningham.sql
 
 -- dev dbcore-dev01  -- use 2 for dev 
 USE [master]
@@ -1088,9 +1088,9 @@ ORDER BY FILEGROUP_NAME(AU.data_space_id), AU.total_pages/128 DESC
 
 select * from msdb.dbo.sysmail_mailitems order by send_request_date desc
 	EXEC msdb.dbo.sp_send_dbmail 
-		@recipients = 'rkumar@AXYZ-asset.com', 
+		@recipients = 'rkumar@AXYZ', 
 		@subject = @Subject,
-		@from_address = 'activefx@AXYZ-asset.com',
+		@from_address = 'activefx@AXYZ',
 		@importance='High',
 		@body_format = 'TEXT',
 		@body = @Body
@@ -1404,7 +1404,7 @@ end
 
 
 ----on BISAM Prod ( use1-prod-db01)
-https://git.AXYZ-asset.com/bisam/database-mssql/-/blob/master/DBBONE01/master/Principals/Logins/svc_sqlweb.sql
+https://git.AXYZ/bisam/database-mssql/-/blob/master/DBBONE01/master/Principals/Logins/svc_sqlweb.sql
  svc_sqlweb.sql 
 USE master
  
